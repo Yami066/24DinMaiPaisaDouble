@@ -831,7 +831,7 @@ For context, here is the full script:
             subtitles_path = self.generate_subtitles(self.tts_path)
             equalize_subtitles(subtitles_path, 10)
             subtitles = SubtitlesClip(subtitles_path, generator)
-            subtitles.set_pos(("center", "center"))
+           subtitles = subtitles.set_pos(("center", 0.75), relative=True)
         except Exception as e:
             warning(f"Failed to generate subtitles, continuing without subtitles: {e}")
 
