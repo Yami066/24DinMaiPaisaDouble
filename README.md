@@ -1,85 +1,14 @@
-# 24DinMaiPaisaDouble
-
-> **Have an idea?** Let’s build it — [reach out](https://forms.gle/bFGvhbYpDJZeoVDRA)
-
----
-
-[![madewithlove](https://img.shields.io/badge/made_with-%E2%9D%A4-red?style=for-the-badge&labelColor=orange)](https://github.com/MaazQureshi101/24DinMaiPaisaDouble)
-
-[![GitHub license](https://img.shields.io/github/license/MaazQureshi101/24DinMaiPaisaDouble?style=for-the-badge)](https://github.com/MaazQureshi101/24DinMaiPaisaDouble/blob/main/LICENSE)
-[![GitHub issues](https://img.shields.io/github/issues/MaazQureshi101/24DinMaiPaisaDouble?style=for-the-badge)](https://github.com/MaazQureshi101/24DinMaiPaisaDouble/issues)
-[![GitHub stars](https://img.shields.io/github/stars/MaazQureshi101/24DinMaiPaisaDouble?style=for-the-badge)](https://github.com/MaazQureshi101/24DinMaiPaisaDouble/stargazers)
-
-An Application that automates the process of making money online.
-24DinMaiPaisaDouble is a comprehensive tool focused on a wide range of features and a modular architecture.
-
-> **Note:** 24DinMaiPaisaDouble needs Python 3.12 to function effectively.
-
-## Features
-
-- [x] Twitter Bot (with CRON Jobs => `scheduler`)
-- [x] YouTube Shorts Automater (with CRON Jobs => `scheduler`)
-- [x] Affiliate Marketing (Amazon + Twitter)
-- [x] Find local businesses & cold outreach
-
-## Installation
-
-> ⚠️ If you are planning to reach out to scraped businesses per E-Mail, please first install the [Go Programming Language](https://golang.org/).
-
-```bash
-git clone https://github.com/MaazQureshi101/24DinMaiPaisaDouble.git
-
-cd 24DinMaiPaisaDouble
-# Copy Example Configuration and fill out values in config.json
-cp config.example.json config.json
-
-# Create a virtual environment
-python -m venv venv
-
-# Activate the virtual environment - Windows
-.\venv\Scripts\activate
-
-# Activate the virtual environment - Unix
-source venv/bin/activate
-
-# Install the requirements
+Here is the complete README with the badges neatly aligned right at the top under the main title. When you paste this into GitHub, the logos will display side-by-side perfectly.🖨️💰 24DinMaiPaisa: Autonomous YouTube Shorts Engine24DinMaiPaisa is an automated pipeline for generating, rendering, and publishing faceless YouTube Shorts.Instead of relying solely on strict and quota-limited APIs, this project utilizes isolated headless browser sessions for uploading, local CPU-optimized LLMs and STT for cost-effective generation, and a multi-provider fallback chain to ensure reliable video rendering.✨ Core Features🎬 YouTube Shorts AutomationAutomated Scripting: Uses local or API-based LLMs to generate engaging, niche-specific scripts and metadata (titles, descriptions, tags).Image Generation Pipeline: Implements a cascading fallback chain for scene generation to ensure high uptime: Google Gemini API ➔ Pollinations.ai ➔ Lexica.art ➔ Picsum ➔ Procedural Gradients.Programmatic Video Assembly: Uses MoviePy to stitch assets together natively. Features dynamic aspect-ratio cropping, center-screen subtitle alignment, and math-based Ken Burns zoom effects.Audio & Subtitles: Synthesizes voiceovers using KittenTTS and generates precise, word-level subtitle timestamps using a CPU-optimized faster-whisper implementation.Headless Publishing: Bypasses the standard YouTube Data API quotas by utilizing persistent Selenium Firefox profiles and explicit WebDriverWaits to securely navigate and upload via the YouTube Studio DOM.🛠️ Tech StackCategoryTechnologies UsedCorePython 3.12Video/AudioMoviePy, FFmpeg, Pillow (PIL)Browser AutomationSelenium WebDriver, webdriver-managerAI / LLMsOllama (llama3.2), Google Gemini APISpeech / TextKittenTTS, faster-whisper🚀 Installation & Setup1. PrerequisitesPython 3.12+ installed on your machine.Mozilla Firefox installed (for persistent profile caching).FFmpeg installed and added to your system's PATH.(Optional) Ollama installed locally if utilizing local LLM inference.2. Clone the RepositoryBashgit clone https://github.com/YOUR_USERNAME/24DinMaiPaisa.git
+cd 24DinMaiPaisa
+3. Environment SetupCreate a virtual environment and install the required dependencies:Bashpython -m venv venv
+# On Windows use: venv\Scripts\activate
+# On macOS/Linux use: source venv/bin/activate 
 pip install -r requirements.txt
-```
-
-## Usage
-
-```bash
-# Run the application
-python src/main.py
-```
-
-## Documentation
-
-All relevant document can be found [here](docs/).
-
-## Scripts
-
-For easier usage, there are some scripts in the `scripts` directory, that can be used to directly access core functionality without the need of user interaction.
-
-All scripts need to be run from the root directory of the project, e.g. `bash scripts/upload_video.sh`.
-
-## Contributing
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct, and the process for submitting pull requests to us. Check out [docs/Roadmap.md](docs/Roadmap.md) for a list of features that need to be implemented.
-
-## Code of Conduct
-
-Please read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for details on our code of conduct, and the process for submitting pull requests to us.
-
-## License
-
-24DinMaiPaisaDouble is licensed under `Affero General Public License v3.0`. See [LICENSE](LICENSE) for more information.
-
-## Acknowledgments
-
-- [KittenTTS](https://github.com/KittenML/KittenTTS)
-- [gpt4free](https://github.com/xtekky/gpt4free)
-
-## Disclaimer
-
-This project is for educational purposes only. The author will not be responsible for any misuse of the information provided. All the information on this website is published in good faith and for general information purpose only. The author does not make any warranties about the completeness, reliability, and accuracy of this information. Any action you take upon the information you find on this website (MaazQureshi101/24DinMaiPaisaDouble), is strictly at your own risk. The author will not be liable for any losses and/or damages in connection with the use of our website.
+4. ConfigurationCreate a config.json file in the root directory (you can copy config.example.json if available) and add your respective API keys and absolute system paths:JSON{
+  "LLM_PROVIDER": "ollama",
+  "GEMINI_API_KEY": "your_api_key_here",
+  "FIREFOX_PROFILE_PATH": "C:/Users/YourName/AppData/Roaming/Mozilla/Firefox/Profiles/your.profile",
+  "USE_CPU_WHISPER": true
+}
+🕹️ UsageTo start the orchestrator, simply run the main script. A terminal GUI will guide you through the available modules:Bashpython src/main.py
+Main Menu Options:YouTube Shorts Automation: Select a configured profile, generate a video from scratch, and upload it to YouTube.Setup CRON Job: Schedule the script to run automatically at specific intervals.🏗️ System Architecture & Data FlowInitialization: main.py reads system states from localized JSON caches (e.g., youtube.json).LLM Routing: Text requests are routed through llm_provider.py, which defaults to local Ollama execution but can fall back to Google Gemini REST endpoints.Asset Generation: Media is serialized to the local disk in a .mp/ temporary folder to prevent memory exhaustion during 1080x1920 video rendering.Built with Python, perseverance, and a lot of API calls.
