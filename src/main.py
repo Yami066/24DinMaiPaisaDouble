@@ -164,7 +164,26 @@ def main():
                     tts = TTS()
 
                     if user_input == 1:
+                        # Story source selection menu
+                        print(colored("\n============ STORY SOURCE ============", "cyan"))
+                        print(colored(" 1. Generate with Ollama (AI Generated)", "cyan"))
+                        print(colored(" 2. Use Real Reddit Story", "cyan"))
+                        print(colored(" =====================================\n", "cyan"))
+
+                        story_choice = question("Select story source: ").strip()
+
+                        if story_choice == "1":
+                            youtube.set_story_mode("ollama")
+                            success("Using Ollama AI generation")
+                        elif story_choice == "2":
+                            youtube.set_story_mode("reddit")
+                            success("Using real Reddit story")
+                        else:
+                            warning("Invalid choice, defaulting to Ollama")
+                            youtube.set_story_mode("ollama")
+
                         youtube.generate_video(tts)
+
                         upload_to_yt = question("Do you want to upload this video to YouTube? (Yes/No): ")
                         if upload_to_yt.lower() == "yes":
                             youtube.upload_video()
