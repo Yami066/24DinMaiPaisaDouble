@@ -47,7 +47,7 @@ def generate_text(prompt: str, model_name: str = None) -> str:
     if model and model != "ignored":
         # Use local Ollama
         response = _client().chat(
-            model=model,
+            model='phi3',
             messages=[{"role": "user", "content": prompt}],
         )
         return response["message"]["content"].strip()
@@ -80,5 +80,81 @@ def generate_text(prompt: str, model_name: str = None) -> str:
         "No working LLM available. Make sure Ollama is running with a model pulled, "
         "or set a valid gemini_image_api_key in config.json."
     )
+
+
+def generate_text_gemini(prompt: str) -> str | None:
+    """Uses Gemini API for high quality text generation with retry backoff."""
+    try:
+        import requests
+        import time
+        from config import get_gemini_image_api_key
+
+        api_key = get_gemini_image_api_key()
+        if not api_key:
+            print("[LLM] No Gemini API key found.")
+            return None
+
+        # Try these models in order if one fails
+        models = [
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+        ]
+
+        for model in models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.9,
+                    "maxOutputTokens": 1000
+                }
+            }
+
+            # Retry up to 3 times with backoff
+            for attempt in range(3):
+                try:
+                    print(f"[LLM] Trying Gemini model '{model}' (attempt {attempt + 1}/3)...")
+                    resp = requests.post(url, json=payload, timeout=30)
+
+                    if resp.status_code == 429:
+                        wait = (attempt + 1) * 10  # 10s, 20s, 30s
+                        print(f"[LLM] Gemini 429 rate limited. Waiting {wait}s...")
+                        time.sleep(wait)
+                        continue
+
+                    if resp.status_code == 503:
+                        wait = (attempt + 1) * 5
+                        print(f"[LLM] Gemini 503 unavailable. Waiting {wait}s...")
+                        time.sleep(wait)
+                        continue
+
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        for part in parts:
+                            if "text" in part:
+                                print(f"[LLM] ✅ Gemini '{model}' succeeded.")
+                                return part["text"].strip()
+
+                    print(f"[LLM] Gemini '{model}' returned no text.")
+                    break  # Try next model
+
+                except Exception as e:
+                    print(f"[LLM] Gemini '{model}' attempt {attempt + 1} failed: {type(e).__name__}: {e}")
+                    if attempt < 2:
+                        time.sleep(5)
+                    continue
+
+        print("[LLM] All Gemini models exhausted.")
+        return None
+
+    except Exception as e:
+        print(f"[LLM] Gemini fatal error: {type(e).__name__}: {e}")
+        return None
 
 

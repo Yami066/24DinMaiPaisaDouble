@@ -6,7 +6,7 @@ import os
 import traceback
 import requests
 import assemblyai as aai
-
+import random
 from utils import *
 from cache import *
 from .Tts import TTS
@@ -87,6 +87,7 @@ class YouTube:
         self.channel_id: str = ""
         self.video_path: str = ""
         self.tts_path: str = ""
+        self.story_mode: str = "ollama"
 
         # Initialize the Firefox profile
         self.options: Options = Options()
@@ -110,6 +111,67 @@ class YouTube:
         self.browser: webdriver.Firefox = webdriver.Firefox(
             service=self.service, options=self.options
         )
+
+    def set_story_mode(self, mode: str) -> None:
+        """
+        Sets the story generation mode.
+
+        Args:
+            mode (str): Either 'ollama' or 'reddit'
+        """
+        self.story_mode = mode
+        print(f"[STORY] Story mode set to: {mode}")
+
+    def fetch_reddit_story(self) -> str | None:
+        """Fetches a random viral story from Reddit public JSON API."""
+        subreddits = [
+            "pettyrevenge",
+            "tifu",
+            "AmItheAsshole",
+            "survivinginfidelity",
+            "entitledparents",
+            "ProRevenge",
+            "TrueOffMyChest",
+            "confession"
+        ]
+
+        subreddit = random.choice(subreddits)
+        print(f"[REDDIT] Fetching from r/{subreddit}...")
+
+        try:
+            url = f"https://www.reddit.com/r/{subreddit}/top.json?limit=25&t=week"
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; VideoBot/1.0)"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+
+            posts = data["data"]["children"]
+
+            # Filter for good length posts only
+            good_posts = [
+                p["data"] for p in posts
+                if 300 < len(p["data"].get("selftext", "")) < 3000
+                and not p["data"].get("stickied", False)
+                and p["data"].get("selftext", "") not in ["[removed]", "[deleted]", ""]
+            ]
+
+            if not good_posts:
+                print("[REDDIT] No suitable posts found this week.")
+                return None
+
+            post = random.choice(good_posts)
+            title = post.get("title", "")
+            body = post.get("selftext", "")
+            subreddit_name = post.get("subreddit_name_prefixed", "")
+            upvotes = post.get("ups", 0)
+
+            print(f"[REDDIT] ✅ Found: '{title[:60]}...' ({upvotes} upvotes) from {subreddit_name}")
+
+            return f"Title: {title}\n\n{body}"
+
+        except Exception as e:
+            print(f"[REDDIT] Failed to fetch: {type(e).__name__}: {e}")
+            return None
 
     @property
     def niche(self) -> str:
@@ -163,57 +225,77 @@ class YouTube:
 
     def generate_script(self) -> str:
         """
-        Generate a script for a video, depending on the subject of the video, the number of paragraphs, and the AI model.
-
-        Returns:
-            script (str): The script of the video.
+        Generate a script based on story_mode:
+        - 'ollama': Generate using local Ollama LLM
+        - 'reddit': Fetch real Reddit story and rewrite with Gemini
         """
         sentence_length = get_script_sentence_length()
-        prompt = f"""
-        Generate a script for a video in {sentence_length} sentences, depending on the subject of the video.
+        completion = ""
 
-        The script is to be returned as a string with the specified number of paragraphs.
+        if self.story_mode == "reddit":
+            print("[SCRIPT] Reddit mode — fetching real story...")
+            reddit_story = self.fetch_reddit_story()
 
-        Here is an example of a string:
-        "This is an example string."
+            if reddit_story:
+                prompt = f"""
+    You are rewriting a real Reddit story into a short punchy script for a YouTube Short video.
 
-        Do not under any circumstance reference this prompt in your response.
+    ORIGINAL REDDIT STORY:
+    {reddit_story}
 
-        Get straight to the point, don't start with unnecessary things like, "welcome to this video".
+    REWRITE RULES:
+    - Condense into exactly {sentence_length} short punchy sentences
+    - Keep it in FIRST PERSON ("I", "me", "my")
+    - Start with the most shocking or hooky part of the story
+    - Keep real specific details that make it feel authentic and human
+    - Add ellipses (...) and em-dashes (—) for dramatic pauses
+    - End with the satisfying twist or revenge moment
+    - Sound like a real person talking to a friend not a narrator
+    - NO markdown, NO formatting, NO titles, NO hashtags
+    - ONLY return the raw script text nothing else
+                """
 
-        Obviously, the script should be related to the subject of the video.
-        
-        YOU MUST NOT EXCEED THE {sentence_length} SENTENCES LIMIT. MAKE SURE THE {sentence_length} SENTENCES ARE SHORT.
-        YOU MUST NOT INCLUDE ANY TYPE OF MARKDOWN OR FORMATTING IN THE SCRIPT, NEVER USE A TITLE.
-        YOU MUST WRITE THE SCRIPT IN THE LANGUAGE SPECIFIED IN [LANGUAGE].
-        ONLY RETURN THE RAW CONTENT OF THE SCRIPT. DO NOT INCLUDE "VOICEOVER", "NARRATOR" OR SIMILAR INDICATORS OF WHAT SHOULD BE SPOKEN AT THE BEGINNING OF EACH PARAGRAPH OR LINE. YOU MUST NOT MENTION THE PROMPT, OR ANYTHING ABOUT THE SCRIPT ITSELF. ALSO, NEVER TALK ABOUT THE AMOUNT OF PARAGRAPHS OR LINES. JUST WRITE THE SCRIPT
+                # Try Gemini first for better rewriting quality
+                from llm_provider import generate_text_gemini
+                completion = generate_text_gemini(prompt) or ""
 
-        ADDITIONAL RULES:
-        - Write in FIRST PERSON ("I", "me", "my") as if a real person is telling their story
-        - Start with a shocking hook that grabs attention in the first 3 words
-        - Use a real character name for anyone mentioned
-        - Include ONE specific shocking detail or unexpected twist
-        - Add ellipses (...) and em-dashes (—) throughout for dramatic pauses
-        - Sound like a real scared/shocked person talking, not a movie narrator
-        - NEVER use vague filler phrases like "tensions rose", "things got worse", "a downward spiral", "paranoia sets in"
-        - Every sentence must describe something SPECIFIC that happened
-        
-        Subject: {self.subject}
-        Language: {self.language}
-        """
-        completion = self.generate_response(prompt)
+                if not completion:
+                    print("[SCRIPT] Gemini failed, trying Ollama...")
+                    completion = self.generate_response(prompt)
+            else:
+                print("[SCRIPT] No Reddit story found, falling back to Ollama...")
+                self.story_mode = "ollama"
 
-        # Apply regex to remove *
+        if self.story_mode == "ollama" or not completion:
+            print("[SCRIPT] Ollama mode — generating AI story...")
+            prompt = f"""
+    Generate a script for a YouTube Short in {sentence_length} sentences.
+
+    STRICT RULES:
+    - Write in FIRST PERSON as if a real person sharing their story
+    - Start with a shocking hook in the first 3 words
+    - Sound like a real Reddit post from r/pettyrevenge or r/tifu
+    - Use a real character name for anyone mentioned
+    - Include ONE specific shocking detail or unexpected twist
+    - Add ellipses (...) and em-dashes (—) for dramatic pauses
+    - NEVER use vague phrases like things got worse or tensions rose
+    - Every sentence must describe something SPECIFIC that happened
+    - NO markdown, NO formatting, ONLY return raw script text
+
+    Subject: {self.subject}
+    Language: {self.language}
+            """
+            completion = self.generate_response(prompt)
+
+        if not completion:
+            error("Script generation failed completely.")
+            return ""
+
+        # Clean up
         completion = re.sub(r"\*", "", completion)
-
-        # Add dramatic TTS pauses
         completion = completion.replace(". ", "... ")
         completion = completion.replace("? ", "?... ")
         completion = completion.replace("! ", "!... ")
-
-        if not completion:
-            error("The generated script is empty.")
-            return
 
         if len(completion) > 5000:
             if get_verbose():
@@ -221,7 +303,7 @@ class YouTube:
             return self.generate_script()
 
         self.script = completion
-
+        success("Script generated successfully.")
         return completion
 
     def generate_metadata(self) -> dict:
@@ -727,21 +809,24 @@ For context, here is the full script:
             device="cpu",  # Force CPU since CUDA is not installed
             compute_type="int8",  # CPU only supports int8 compute for whisper models,
         )
-        segments, _ = model.transcribe(audio_path, vad_filter=True)
+        segments, _ = model.transcribe(audio_path, vad_filter=True, word_timestamps=True)
 
         lines = []
-        for idx, segment in enumerate(segments, start=1):
-            start = self._format_srt_timestamp(segment.start)
-            end = self._format_srt_timestamp(segment.end)
-            text = str(segment.text).strip()
-
-            if not text:
+        idx = 1
+        for segment in segments:
+            if not hasattr(segment, "words") or not segment.words:
                 continue
-
-            lines.append(str(idx))
-            lines.append(f"{start} --> {end}")
-            lines.append(text)
-            lines.append("")
+            for word in segment.words:
+                start = self._format_srt_timestamp(word.start)
+                end = self._format_srt_timestamp(word.end)
+                text = word.word.strip()
+                if not text:
+                    continue
+                lines.append(str(idx))
+                lines.append(f"{start} --> {end}")
+                lines.append(text.upper())   # uppercase looks cleaner for single words
+                lines.append("")
+                idx += 1
 
         subtitles = "\n".join(lines)
         srt_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".srt")
@@ -770,14 +855,15 @@ For context, here is the full script:
 
         # Make a generator that returns a TextClip when called with consecutive
         generator = lambda txt: TextClip(
-            txt,
-            font=os.path.join(get_fonts_dir(), get_font()),
-            fontsize=90,
-            color="white",
-            stroke_color="black",
-            stroke_width=8,
-            size=(1000, None),
-            method="caption",
+                txt,
+                font=os.path.join(get_fonts_dir(), get_font()),
+                fontsize=88,
+                color="yellow",        # yellow is far more readable on any background
+                stroke_color="black",
+                stroke_width=4,        # thinner stroke, less bleed
+                size=(880, None),
+                method="caption",
+                align="center"
         )
 
         print(colored("[+] Combining images...", "blue"))
@@ -826,26 +912,36 @@ For context, here is the full script:
         final_clip = final_clip.set_fps(30)
         random_song = choose_random_song()
 
+        # Try to use gameplay background video
+        bg_clip = self.get_background_clip(tts_clip.duration)
+
         subtitles = None
         try:
             subtitles_path = self.generate_subtitles(self.tts_path)
             equalize_subtitles(subtitles_path, 10)
             subtitles = SubtitlesClip(subtitles_path, generator)
-           subtitles = subtitles.set_pos(("center", 0.75), relative=True)
+            subtitles = subtitles.set_pos(("center", 0.75), relative=True)
         except Exception as e:
-            warning(f"Failed to generate subtitles, continuing without subtitles: {e}")
+            warning(f"Failed to generate subtitles: {e}")
 
         random_song_clip = AudioFileClip(random_song).set_fps(44100)
-
-        # Turn down volume
         random_song_clip = random_song_clip.fx(afx.volumex, 0.1)
         comp_audio = CompositeAudioClip([tts_clip.set_fps(44100), random_song_clip])
 
-        final_clip = final_clip.set_audio(comp_audio)
-        final_clip = final_clip.set_duration(tts_clip.duration)
-
-        if subtitles is not None:
-            final_clip = CompositeVideoClip([final_clip, subtitles])
+        if bg_clip is not None:
+            # Use gameplay as background — ignore generated images
+            base_clip = bg_clip.set_audio(comp_audio)
+            base_clip = base_clip.set_duration(tts_clip.duration)
+            if subtitles is not None:
+                final_clip = CompositeVideoClip([base_clip, subtitles])
+            else:
+                final_clip = base_clip
+        else:
+            # Fall back to image slideshow if no background video
+            final_clip = final_clip.set_audio(comp_audio)
+            final_clip = final_clip.set_duration(tts_clip.duration)
+            if subtitles is not None:
+                final_clip = CompositeVideoClip([final_clip, subtitles])
 
         final_clip.write_videofile(combined_image_path, threads=threads)
 
@@ -1133,3 +1229,34 @@ For context, here is the full script:
                     videos = account.get("videos", [])
 
         return videos
+
+
+    #NEW FEATURE 
+    def get_background_clip(self, duration: float):
+        """Gets a random background gameplay clip looped to duration."""
+        bg_dir = os.path.join(ROOT_DIR, "assets", "backgrounds")
+        if not os.path.exists(bg_dir):
+            os.makedirs(bg_dir)
+            return None
+        
+        bg_files = [f for f in os.listdir(bg_dir) 
+                    if f.endswith(('.mp4', '.mov', '.avi'))]
+        if not bg_files:
+            print("[BG] No background videos found in assets/backgrounds/")
+            return None
+        
+        bg_path = os.path.join(bg_dir, random.choice(bg_files))
+        print(f"[BG] Using background: {bg_path}")
+        bg_clip = VideoFileClip(bg_path)
+        
+        # Loop if shorter than needed
+        if bg_clip.duration < duration:
+            loops = int(duration / bg_clip.duration) + 1
+            bg_clip = concatenate_videoclips([bg_clip] * loops)
+        
+        # Start from random point for variety
+        max_start = max(0, bg_clip.duration - duration - 1)
+        start = random.uniform(0, max_start) if max_start > 0 else 0
+        bg_clip = bg_clip.subclip(start, start + duration)
+        bg_clip = bg_clip.resize((1080, 1920))
+        return bg_clip
