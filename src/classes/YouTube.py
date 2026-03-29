@@ -147,10 +147,13 @@ class YouTube:
 
             posts = data["data"]["children"]
 
-            # Filter for good length posts only
+           
+
             good_posts = [
                 p["data"] for p in posts
                 if 300 < len(p["data"].get("selftext", "")) < 3000
+                and p["data"].get("ups", 0) > 1000
+                and p["data"].get("upvote_ratio", 0) > 0.85
                 and not p["data"].get("stickied", False)
                 and p["data"].get("selftext", "") not in ["[removed]", "[deleted]", ""]
             ]
@@ -238,26 +241,23 @@ class YouTube:
 
             if reddit_story:
                 prompt = f"""
-    You are rewriting a real Reddit story into a short punchy script for a YouTube Short video.
+    You are rewriting a real Reddit story into a script for a YouTube Short. Your output will be read by a Text-to-Speech AI, so PUNCTUATION IS CRITICAL.
 
     ORIGINAL REDDIT STORY:
     {reddit_story}
 
-    REWRITE RULES:
-    - Condense into exactly {sentence_length} short punchy sentences
-    - Keep it in FIRST PERSON ("I", "me", "my")
-    - Start with the most shocking or hooky part of the story
-    - Keep real specific details that make it feel authentic and human
-    - Add ellipses (...) and em-dashes (—) for dramatic pauses
-    - End with the satisfying twist or revenge moment
-    - Sound like a real person talking to a friend not a narrator
-    - NO markdown, NO formatting, NO titles, NO hashtags
-    - ONLY return the raw script text nothing else
+    STRICT REWRITE RULES:
+    1. LENGTH: Condense into exactly {sentence_length} short sentences.
+    2. POV: First-person ("I", "me", "my"). Sound like a real, casual person talking to a friend. 
+    3. HOOK: Start with the most shocking detail immediately.
+    4. PUNCTUATION FOR AUDIO: You MUST use periods, commas, and ellipses (...) frequently. Do NOT write long run-on sentences. The AI needs punctuation to know when to breathe.
+    5. BANNED WORDS: Do NOT use dramatic/AI vocabulary like "alas", "unruly", "delved", "tensions rose", or "spirits". Keep it conversational.
+    6. FORMATTING: NO markdown, NO titles, NO hashtags. ONLY return the raw script text.
                 """
 
                 # Try Gemini first for better rewriting quality
                 from llm_provider import generate_text_gemini
-                completion = generate_text_gemini(prompt) or ""
+                completion = self.generate_response(prompt) or ""
 
                 if not completion:
                     print("[SCRIPT] Gemini failed, trying Ollama...")
@@ -269,20 +269,17 @@ class YouTube:
         if self.story_mode == "ollama" or not completion:
             print("[SCRIPT] Ollama mode — generating AI story...")
             prompt = f"""
-    Generate a script for a YouTube Short in {sentence_length} sentences.
+    Write a cohesive, single-event story script for a YouTube Short in exactly {sentence_length} sentences.
 
-    STRICT RULES:
-    - Write in FIRST PERSON as if a real person sharing their story
-    - Start with a shocking hook in the first 3 words
-    - Sound like a real Reddit post from r/pettyrevenge or r/tifu
-    - Use a real character name for anyone mentioned
-    - Include ONE specific shocking detail or unexpected twist
-    - Add ellipses (...) and em-dashes (—) for dramatic pauses
-    - NEVER use vague phrases like things got worse or tensions rose
-    - Every sentence must describe something SPECIFIC that happened
-    - NO markdown, NO formatting, ONLY return raw script text
+    STRICT NARRATIVE RULES:
+    1. ONE PLOT: The story must revolve around ONE single event, ONE setting, and ONE main conflict. Do NOT jump between different locations or introduce random new characters halfway through.
+    2. POV & TONE: Write in the first-person ("I", "me"). Sound like a real, casual person telling a story to a friend.
+    3. HOOK: Start with a clear one-sentence hook that grounds the viewer.
+    4. PUNCTUATION FOR AUDIO: Use periods, commas, and ellipses (...) frequently so the Text-to-Speech AI knows when to pause. 
+    5. BANNED WORDS: Do NOT use dramatic/AI phrases like "whirlwind of unexpected encounters", "alas", or "little did I know". Keep the vocabulary grounded and human.
+    6. FORMATTING: NO markdown, NO hashtags. ONLY return the raw script text.
 
-    Subject: {self.subject}
+    Topic: {self.subject}
     Language: {self.language}
             """
             completion = self.generate_response(prompt)
@@ -292,10 +289,23 @@ class YouTube:
             return ""
 
         # Clean up
-        completion = re.sub(r"\*", "", completion)
-        completion = completion.replace(". ", "... ")
-        completion = completion.replace("? ", "?... ")
-        completion = completion.replace("! ", "!... ")
+        # Remove ellipses
+        completion = completion.replace("...", " ")
+        completion = completion.replace("..", " ")
+
+        # Remove em dashes
+        completion = completion.replace("—", ", ")
+        completion = completion.replace("–", ", ")
+
+        # Remove asterisks
+        completion = re.sub(r"\*+", "", completion)
+
+        # Remove weird symbols except basic punctuation
+        completion = re.sub(r"[^\w\s.,!?']", "", completion)
+
+        # Fix double spaces
+        completion = re.sub(r" +", " ", completion).strip()
+       
 
         if len(completion) > 5000:
             if get_verbose():
@@ -317,10 +327,7 @@ class YouTube:
             f"Please generate a YouTube Video Title for the following subject, including hashtags: {self.subject}. Only return the title, nothing else. Limit the title under 100 characters."
         )
 
-        if len(title) > 100:
-            if get_verbose():
-                warning("Generated Title is too long. Retrying...")
-            return self.generate_metadata()
+        title = title.strip()[:99]
 
         description = self.generate_response(
             f"Please generate a YouTube Video Description for the following script: {self.script}. Only return the description, nothing else."
@@ -425,34 +432,7 @@ For context, here is the full script:
         self.images.append(image_path)
         return image_path
 
-    def _make_fallback_image(self, prompt: str) -> str | None:
-        """Creates a simple gradient background image using Pillow as a last resort."""
-        try:
-            from PIL import Image, ImageDraw
-            import random
-
-            w, h = 1080, 1920
-            img = Image.new("RGB", (w, h))
-            draw = ImageDraw.Draw(img)
-            r1, g1, b1 = random.randint(10, 80), random.randint(10, 60), random.randint(40, 120)
-            r2, g2, b2 = random.randint(20, 100), random.randint(5, 50), random.randint(60, 180)
-            for y in range(h):
-                t = y / h
-                r = int(r1 + (r2 - r1) * t)
-                g = int(g1 + (g2 - g1) * t)
-                b = int(b1 + (b2 - b1) * t)
-                draw.line([(0, y), (w, y)], fill=(r, g, b))
-
-            image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
-            img.save(image_path)
-            self.images.append(image_path)
-            if get_verbose():
-                info(f" => Generated fallback gradient image: {image_path}")
-            return image_path
-        except Exception as e:
-            if get_verbose():
-                warning(f"Fallback image generation failed: {e}")
-            return None
+   
 
     # ------------------------------------------------------------------ #
     #  Image generation — provider chain                                   #
@@ -846,70 +826,89 @@ For context, here is the full script:
         threads = get_threads()
         tts_clip = AudioFileClip(self.tts_path)
         max_duration = tts_clip.duration
-        if not self.images:
+        if not self.images and self.story_mode != "reddit":
             raise RuntimeError(
                 "No images were generated. Cannot combine video. "
                 "Check that your Gemini API key is valid and has image generation access."
             )
-        req_dur = max_duration / len(self.images)
+        req_dur = max_duration / len(self.images) if self.images else 0
 
         # Make a generator that returns a TextClip when called with consecutive
-        generator = lambda txt: TextClip(
-                txt,
+        highlight_words = [
+            "betrayed", "exposed", "revenge", "fired", "cheated",
+            "caught", "shocked", "insane", "crazy", "lost",
+            "ended", "friend", "lied", "secret", "truth", "jerk", "money"
+        ]
+        highlight_colors = ["#FF3131", "#00FF00", "#FFD700", "#FF6B00"] # Red, Green, Gold, Orange
+
+        def generator(txt):
+            # Strip punctuation and make lowercase for accurate matching
+            clean_word = "".join(c for c in txt if c.isalnum()).lower()
+            
+            if any(hw == clean_word for hw in highlight_words):
+                color = random.choice(highlight_colors)
+            else:
+                color = "white"
+                
+            return TextClip(
+                txt.upper(),
                 font=os.path.join(get_fonts_dir(), get_font()),
-                fontsize=88,
-                color="yellow",        # yellow is far more readable on any background
+                fontsize=100,
+                color=color,
                 stroke_color="black",
-                stroke_width=4,        # thinner stroke, less bleed
+                stroke_width=6,
                 size=(880, None),
                 method="caption",
                 align="center"
-        )
+            )
 
         print(colored("[+] Combining images...", "blue"))
 
+        
+        # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
         clips = []
         tot_dur = 0
-        # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
-        while tot_dur < max_duration:
-            for image_path in self.images:
-                clip = ImageClip(image_path)
-                clip.duration = req_dur
-                clip = clip.set_fps(30)
-                clip = clip.resize(lambda t: 1 + 0.03 * t)
+        if self.images:
+            while tot_dur < max_duration:
+                for image_path in self.images:
+                    clip = ImageClip(image_path)
+                    clip.duration = req_dur
+                    clip = clip.set_fps(30)
+                    clip = clip.resize(lambda t: 1 + 0.03 * t)
 
-                # Not all images are same size,
-                # so we need to resize them
-                if round((clip.w / clip.h), 4) < 0.5625:
-                    if get_verbose():
-                        info(f" => Resizing Image: {image_path} to 1080x1920")
-                    clip = crop(
-                        clip,
-                        width=clip.w,
-                        height=round(clip.w / 0.5625),
-                        x_center=clip.w / 2,
-                        y_center=clip.h / 2,
-                    )
-                else:
-                    if get_verbose():
-                        info(f" => Resizing Image: {image_path} to 1920x1080")
-                    clip = crop(
-                        clip,
-                        width=round(0.5625 * clip.h),
-                        height=clip.h,
-                        x_center=clip.w / 2,
-                        y_center=clip.h / 2,
-                    )
-                clip = clip.resize((1080, 1920))
+                    # Not all images are same size,
+                    # so we need to resize them
+                    if round((clip.w / clip.h), 4) < 0.5625:
+                        if get_verbose():
+                            info(f" => Resizing Image: {image_path} to 1080x1920")
+                        clip = crop(
+                            clip,
+                            width=clip.w,
+                            height=round(clip.w / 0.5625),
+                            x_center=clip.w / 2,
+                            y_center=clip.h / 2,
+                        )
+                    else:
+                        if get_verbose():
+                            info(f" => Resizing Image: {image_path} to 1920x1080")
+                        clip = crop(
+                            clip,
+                            width=round(0.5625 * clip.h),
+                            height=clip.h,
+                            x_center=clip.w / 2,
+                            y_center=clip.h / 2,
+                        )
+                    clip = clip.resize((1080, 1920))
 
-                # FX (Fade In)
-                # clip = clip.fadein(2)
+                    # FX (Fade In)
+                    # clip = clip.fadein(2)
 
-                clips.append(clip)
-                tot_dur += clip.duration
+                    clips.append(clip)
+                    tot_dur += clip.duration
 
-        final_clip = concatenate_videoclips(clips)
-        final_clip = final_clip.set_fps(30)
+        final_clip = concatenate_videoclips(clips) if clips else None
+        if final_clip:
+            final_clip = final_clip.set_fps(30)
         random_song = choose_random_song()
 
         # Try to use gameplay background video
@@ -937,11 +936,13 @@ For context, here is the full script:
             else:
                 final_clip = base_clip
         else:
-            # Fall back to image slideshow if no background video
-            final_clip = final_clip.set_audio(comp_audio)
-            final_clip = final_clip.set_duration(tts_clip.duration)
-            if subtitles is not None:
-                final_clip = CompositeVideoClip([final_clip, subtitles])
+            if final_clip is not None:
+                final_clip = final_clip.set_audio(comp_audio)
+                final_clip = final_clip.set_duration(tts_clip.duration)
+                if subtitles is not None:
+                    final_clip = CompositeVideoClip([final_clip, subtitles])
+            else:
+                raise RuntimeError("No background video and no images available. Cannot combine video.")
 
         final_clip.write_videofile(combined_image_path, threads=threads)
 
@@ -968,14 +969,16 @@ For context, here is the full script:
         # Generate the Metadata
         self.generate_metadata()
 
-        # Generate the Image Prompts
-        self.generate_prompts()
-
-        # Generate the Images — sleep between prompts to respect rate limits
-        for idx, prompt in enumerate(self.image_prompts):
-            self.generate_image(prompt)
-            if idx < len(self.image_prompts) - 1:
-                time.sleep(2)  # 2s gap between each image request
+        # Only generate images in Ollama mode
+        # Reddit mode uses gameplay background video instead
+        if self.story_mode != "reddit":
+            self.generate_prompts()
+            for idx, prompt in enumerate(self.image_prompts):
+                self.generate_image(prompt)
+                if idx < len(self.image_prompts) - 1:
+                    time.sleep(2)
+        else:
+            print("[VIDEO] Reddit mode — skipping image generation, using background video instead.")
 
         # Generate the TTS
         self.generate_script_to_speech(tts_instance)
@@ -1152,7 +1155,7 @@ For context, here is the full script:
             )
             print(f"[UPLOAD] Found {len(radio_buttons)} radio buttons")
             if len(radio_buttons) >= 3:
-                radio_buttons[2].click()  # index 2 = Unlisted
+                radio_buttons[0].click()  # index 2 = Unlisted
             else:
                 warning(f"Expected >=3 radio buttons for visibility, got {len(radio_buttons)}. Skipping unlisted selection.")
 

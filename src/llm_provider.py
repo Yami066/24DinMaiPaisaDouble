@@ -47,8 +47,9 @@ def generate_text(prompt: str, model_name: str = None) -> str:
     if model and model != "ignored":
         # Use local Ollama
         response = _client().chat(
-            model='phi3',
+            model=model, # Fixed hardcoded 'phi3'
             messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.5} # Lower temperature for narrative consistency
         )
         return response["message"]["content"].strip()
 
@@ -107,7 +108,7 @@ def generate_text_gemini(prompt: str) -> str | None:
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "temperature": 0.9,
+                    "temperature": 0.5, # Lowered from 0.9 to prevent hallucinations
                     "maxOutputTokens": 1000
                 }
             }
