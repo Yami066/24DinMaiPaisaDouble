@@ -1,4 +1,0 @@
-STATUS: FAILURE
-WORDS: ?
-
-None
