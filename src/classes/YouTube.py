@@ -9,7 +9,6 @@ import assemblyai as aai
 import random
 from utils import *
 from cache import *
-from .Tts import TTS
 from llm_provider import generate_text
 from config import *
 from status import *
@@ -196,17 +195,19 @@ class YouTube:
         """
         return self._language
 
-    def generate_response(self, prompt: str, model_name: str | None = None) -> str:
+    def generate_response(self, prompt: str, model_name: str | None = None, system_prompt: str | None = None) -> str:
         """
         Generates an LLM Response based on a prompt and the user-provided model.
 
         Args:
             prompt (str): The prompt to use in the text generation.
+            model_name (str | None): Optional model override.
+            system_prompt (str | None): Optional system-level instruction message.
 
         Returns:
-            response (str): The generated AI Repsonse.
+            response (str): The generated AI Response.
         """
-        return generate_text(prompt, model_name=model_name)
+        return generate_text(prompt, model_name=model_name, system_prompt=system_prompt)
 
     def generate_topic(self) -> str:
         """
@@ -229,60 +230,111 @@ class YouTube:
     def generate_script(self) -> str:
         """
         Generate a script based on story_mode:
-        - 'ollama': Generate using local Ollama LLM
-        - 'reddit': Fetch real Reddit story and rewrite with Gemini
+
+        Reddit mode flow (strict order):
+          STEP 1 — Fetch Reddit story
+          STEP 2 — Try Gemini 2.5 Flash first (via generate_text_gemini)
+          STEP 3 — If Gemini fails/returns None, fall back to Ollama
+          STEP 4 — Use whichever script was generated for TTS/video
+
+        Ollama mode:
+          Generates an original AI story via the local Ollama model.
         """
-        sentence_length = get_script_sentence_length()
         completion = ""
 
         if self.story_mode == "reddit":
+            # ── STEP 1: Fetch Reddit story ────────────────────────────────
             print("[SCRIPT] Reddit mode — fetching real story...")
             reddit_story = self.fetch_reddit_story()
 
             if reddit_story:
-                prompt = f"""
-    You are rewriting a real Reddit story into a script for a YouTube Short. Your output will be read by a Text-to-Speech AI, so PUNCTUATION IS CRITICAL.
+                # ── SYSTEM PROMPT ──────────────────────────────────────────
+                reddit_system_prompt = """You are a YouTube Shorts narrator. Your job is to turn a raw Reddit post into a gripping first-person voiceover script.
 
-    ORIGINAL REDDIT STORY:
-    {reddit_story}
+STRICT OUTPUT RULES — violate any of these and you have failed:
+1. WORD COUNT: 150-200 words maximum. Hard limit. No exceptions.
+2. VOICE: First-person only. "I", "me", "my". You ARE the person in the story.
+3. SENTENCE LENGTH: Short. Punchy. Dramatic. Never more than 15 words per sentence.
+4. BANNED PHRASES: Never write — "I decided to", "I realized that", "I learned a valuable lesson", "little did I know", "at the end of the day", "needless to say", "in conclusion", "alas", "delved", "unruly", "tensions rose".
+5. STRUCTURE:
+   - Open with the single most shocking sentence from the story. No warm-up. No intro.
+   - Build tension with short, staccato sentences. Use line breaks to control pacing.
+   - End on a cliffhanger line or a gut-punch emotional reveal. One sentence. Make it land.
+6. FORMATTING: Plain narration text ONLY. No headers. No bullet points. No stage directions. No emojis. No hashtags. No markdown.
+7. DO NOT copy sentences verbatim from the Reddit post. Rewrite everything."""
 
-    STRICT REWRITE RULES:
-    1. LENGTH: Condense into exactly {sentence_length} short sentences.
-    2. POV: First-person ("I", "me", "my"). Sound like a real, casual person talking to a friend. 
-    3. HOOK: Start with the most shocking detail immediately.
-    4. PUNCTUATION FOR AUDIO: You MUST use periods, commas, and ellipses (...) frequently. Do NOT write long run-on sentences. The AI needs punctuation to know when to breathe.
-    5. BANNED WORDS: Do NOT use dramatic/AI vocabulary like "alas", "unruly", "delved", "tensions rose", or "spirits". Keep it conversational.
-    6. FORMATTING: NO markdown, NO titles, NO hashtags. ONLY return the raw script text.
-                """
+                # ── USER PROMPT ────────────────────────────────────────────
+                reddit_user_prompt = (
+                    "Turn this Reddit story into a YouTube Shorts voiceover script "
+                    "following your rules exactly.\n\nRAW STORY:\n" + reddit_story
+                )
 
-                # Try Gemini first for better rewriting quality
-                from llm_provider import generate_text_gemini
-                completion = self.generate_response(prompt) or ""
+                # ── STEP 2: Try Gemini FIRST ──────────────────────────────
+                print("[SCRIPT] Trying Gemini 2.5 Flash first...")
+                try:
+                    from llm_provider import generate_text_gemini
+                    completion = generate_text_gemini(
+                        reddit_user_prompt,
+                        system_prompt=reddit_system_prompt,
+                    ) or ""
+                    if completion:
+                        print("[SCRIPT] ✅ Gemini succeeded.")
+                    else:
+                        print("[SCRIPT] ⚠️  Gemini returned empty output.")
+                except Exception as gemini_err:
+                    print(f"[SCRIPT] ⚠️  Gemini raised exception: {type(gemini_err).__name__}: {gemini_err}")
+                    completion = ""
 
+                # ── STEP 3: Fall back to Ollama if Gemini failed ──────────
                 if not completion:
-                    print("[SCRIPT] Gemini failed, trying Ollama...")
-                    completion = self.generate_response(prompt)
+                    print("[SCRIPT] Gemini failed — falling back to Ollama...")
+                    try:
+                        from llm_provider import generate_text_ollama
+                        completion = generate_text_ollama(
+                            reddit_user_prompt,
+                            system_prompt=reddit_system_prompt,
+                        ) or ""
+                        if completion:
+                            print("[SCRIPT] ✅ Ollama fallback succeeded.")
+                        else:
+                            print("[SCRIPT] ❌ Ollama also returned empty output.")
+                    except Exception as ollama_err:
+                        print(f"[SCRIPT] ❌ Ollama fallback failed: {type(ollama_err).__name__}: {ollama_err}")
+                        completion = ""
+
             else:
-                print("[SCRIPT] No Reddit story found, falling back to Ollama...")
+                print("[SCRIPT] No Reddit story found — falling back to Ollama story generation...")
                 self.story_mode = "ollama"
 
         if self.story_mode == "ollama" or not completion:
+            # ── Ollama original story generation ─────────────────────────
             print("[SCRIPT] Ollama mode — generating AI story...")
-            prompt = f"""
-    Write a cohesive, single-event story script for a YouTube Short in exactly {sentence_length} sentences.
 
-    STRICT NARRATIVE RULES:
-    1. ONE PLOT: The story must revolve around ONE single event, ONE setting, and ONE main conflict. Do NOT jump between different locations or introduce random new characters halfway through.
-    2. POV & TONE: Write in the first-person ("I", "me"). Sound like a real, casual person telling a story to a friend.
-    3. HOOK: Start with a clear one-sentence hook that grounds the viewer.
-    4. PUNCTUATION FOR AUDIO: Use periods, commas, and ellipses (...) frequently so the Text-to-Speech AI knows when to pause. 
-    5. BANNED WORDS: Do NOT use dramatic/AI phrases like "whirlwind of unexpected encounters", "alas", or "little did I know". Keep the vocabulary grounded and human.
-    6. FORMATTING: NO markdown, NO hashtags. ONLY return the raw script text.
+            ollama_system_prompt = (
+                "You are a YouTube Shorts narrator who writes original short-form stories. "
+                "Your output is read aloud by a Text-to-Speech AI — pacing and clarity are critical.\n\n"
+                "STRICT OUTPUT RULES:\n"
+                "1. WORD COUNT: 150-200 words maximum. Hard limit.\n"
+                "2. VOICE: First-person only. \"I\", \"me\", \"my\".\n"
+                "3. SENTENCE LENGTH: Short. Punchy. Never more than 15 words per sentence.\n"
+                "4. HOOK: The very first sentence must grab attention immediately.\n"
+                "5. TENSION: Build dread or conflict with short staccato sentences.\n"
+                "6. ENDING: Close with a single cliffhanger or emotional gut-punch.\n"
+                "7. BANNED PHRASES: \"I decided to\", \"I realized that\", \"little did I know\", \"alas\".\n"
+                "8. FORMATTING: Plain narration text only. No headers, bullets, emojis, or markdown."
+            )
 
-    Topic: {self.subject}
-    Language: {self.language}
-            """
-            completion = self.generate_response(prompt)
+            ollama_user_prompt = (
+                f"Write an original first-person story for a YouTube Short.\n\n"
+                f"Topic: {self.subject}\n"
+                f"Language: {self.language}\n\n"
+                f"Follow your rules exactly. Output the narration script only."
+            )
+
+            completion = self.generate_response(
+                ollama_user_prompt,
+                system_prompt=ollama_system_prompt,
+            )
 
         if not completion:
             error("Script generation failed completely.")
@@ -350,10 +402,13 @@ class YouTube:
 Subject: {self.subject}
 
 STRICT RULES:
-- Every prompt MUST end with this style tag: "dark academia, moody lighting, cinematic, 4k, dramatic shadows"
-- Every prompt must describe a SPECIFIC visible scene (example: "a trembling girl clutches a torn script under a single flickering spotlight on an empty stage, dark academia, moody lighting, cinematic, 4k, dramatic shadows")
-- Keep the SAME character and setting across all prompts so the video feels like one coherent story
-- NO vague prompts like "a woman feeling sad" or "tension rises" - always describe exactly what is physically visible in the scene
+- Include a specific emotion visible in the scene (shock, grief, anger, joy)
+- Include a clear subject action (not just "stands" or "sits")
+- Specify the exact setting from the story
+- Append this to EVERY prompt automatically: ", vertical 9:16 frame, cinematic still, dramatic lighting, photorealistic, 4k"
+- Every prompt must describe a SPECIFIC visible scene
+- Keep the SAME characters and context across all prompts so the video feels like one coherent story
+- NO vague prompts like "a woman feeling sad" or "tension rises"
 - Vary the camera angle in each prompt (close-up, wide shot, overhead, etc.)
 - Return ONLY a JSON array of strings, nothing else
 
@@ -439,74 +494,66 @@ For context, here is the full script:
     # ------------------------------------------------------------------ #
 
     def _try_pollinations(self, prompt: str) -> str | None:
-        """Attempt image generation via Pollinations.ai with 429 backoff."""
-        import urllib.parse
-        from requests.exceptions import HTTPError
-
-        prompt_clean = prompt.strip()
-        encoded = urllib.parse.quote(prompt_clean)
-        seed = abs(hash(prompt_clean)) % 99999
-
-        models = ["flux", "turbo", "flux-realism", "dreamshaper", "deliberate"]
-
-        for i, model in enumerate(models):
-            time.sleep(3)  # be polite to the API
-            url = (
-                f"https://image.pollinations.ai/prompt/{encoded}"
-                f"?width=1080&height=1920&model={model}&nologo=true&seed={seed}"
-            )
-            try:
-                response = requests.get(url, timeout=30)
-
-                if response.status_code == 429:
-                    wait = (i + 1) * 8
-                    print(f"[IMG] Pollinations 429 on '{model}'. Waiting {wait}s...")
-                    time.sleep(wait)
-                    continue
-
-                response.raise_for_status()
-
-                if len(response.content) > 1000:
-                    return self._persist_image(response.content, f"Pollinations ({model})")
-
-            except HTTPError as e:
-                print(f"[IMG] Pollinations HTTP error on '{model}': {e}")
-            except Exception as e:
-                print(f"[IMG] Pollinations error on '{model}': {type(e).__name__}: {e}")
-
-        return None
-
-    def _try_lexica(self, prompt: str) -> str | None:
-        """Search Lexica.art for an existing image matching the prompt (free, no key)."""
+        """Attempt image generation via Pollinations.ai with 60s timeout (Primary)."""
+        import requests
         import urllib.parse
         try:
-            encoded = urllib.parse.quote(prompt.strip())
-            search_url = f"https://lexica.art/api/v1/search?q={encoded}"
-            print(f"[IMG] Trying Lexica.art: {prompt[:50]}...")
-            resp = requests.get(search_url, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            images = data.get("images", [])
-            if not images:
-                print("[IMG] Lexica returned 0 results.")
-                return None
-            # Prefer portrait images (height >= width)
-            for img_meta in images[:10]:
-                img_url = img_meta.get("src") or img_meta.get("srcSmall", "")
-                if not img_url:
-                    continue
-                try:
-                    img_resp = requests.get(img_url, timeout=25)
-                    img_resp.raise_for_status()
-                    if len(img_resp.content) > 5000:
-                        return self._persist_image(img_resp.content, "Lexica.art")
-                except Exception as e:
-                    print(f"[IMG] Lexica image download failed: {e}")
-                    continue
-            print("[IMG] Lexica: no downloadable image found.")
+            image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
+            encoded_prompt = urllib.parse.quote(prompt)
+            # Add quality modifiers to every prompt
+            enhanced = f"{prompt}, cinematic, dramatic lighting, 4k, highly detailed"
+            encoded = urllib.parse.quote(enhanced)
+            url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&enhance=true"
+            
+            print(f"[IMG] Trying Pollinations.ai: {prompt[:50]}...")
+            response = requests.get(url, timeout=60)  # 60s timeout — it's slow
+            if response.status_code == 200 and len(response.content) > 10000:
+                with open(image_path, 'wb') as f:
+                    f.write(response.content)
+                self.images.append(image_path)
+                return image_path
+            return None
         except Exception as e:
-            print(f"[IMG] Lexica.art error: {type(e).__name__}: {e}")
-        return None
+            print(f"[IMG] Pollinations failed: {e}")
+            return None
+
+    def _try_gemini(self, prompt: str) -> str | None:
+        """Attempt image generation via Gemini Imagen (Secondary Fallback)."""
+        try:
+            import base64, json, requests
+            image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
+            
+            # Load config to get API key natively here
+            with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+                api_key = json.load(file).get("gemini_image_api_key", "")
+                
+            if not api_key:
+                return None
+            
+            print(f"[IMG] Trying Gemini Imagen: {prompt[:50]}...")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-fast-generate-001:predict?key={api_key}"
+            payload = {
+                "instances": [{"prompt": prompt}],
+                "parameters": {
+                    "sampleCount": 1,
+                    "aspectRatio": "9:16"  # vertical for Shorts
+                }
+            }
+            response = requests.post(url, json=payload, timeout=30)
+            data = response.json()
+            
+            if "predictions" in data:
+                img_data = data["predictions"][0]["bytesBase64Encoded"]
+                with open(image_path, 'wb') as f:
+                    f.write(base64.b64decode(img_data))
+                self.images.append(image_path)
+                return image_path
+            else:
+                print(f"[IMG] Gemini Imagen error: {data}")
+                return None
+        except Exception as e:
+            print(f"[IMG] Gemini Imagen failed: {e}")
+            return None
 
     def _try_picsum(self, prompt: str) -> str | None:
         try:
@@ -609,8 +656,11 @@ For context, here is the full script:
 
     def generate_image(self, prompt: str) -> str | None:
         """
-        Generates an AI Image using a provider chain controlled by `image_provider`
-        in config. Falls back through Pollinations → Lexica → Picsum → gradient.
+        Generates an AI Image using the fallback chain.
+        1. Pollinations.ai
+        2. Gemini Imagen
+        3. Picsum
+        4. Gradient Fallback
 
         Args:
             prompt (str): The image generation prompt.
@@ -618,50 +668,73 @@ For context, here is the full script:
         Returns:
             path (str): Path to the saved PNG, or None.
         """
-        provider = str(get_image_provider()).lower()
-        print(f"[IMG] image_provider='{provider}' | prompt: {prompt[:60]}...")
-
-        if provider == "pollinations":
-            return self._try_pollinations(prompt) or self._make_fallback_image(prompt)
-
-        if provider == "lexica":
-            return self._try_lexica(prompt) or self._make_fallback_image(prompt)
-
-        if provider == "picsum":
-            return self._try_picsum(prompt) or self._make_fallback_image(prompt)
-
-        # Default: "auto" — try all in order
         result = self._try_pollinations(prompt)
         if result:
+            print("[IMG] Provider: Pollinations OK")
             return result
-        print("[IMG] Pollinations failed, trying Lexica...")
-        result = self._try_lexica(prompt)
+            
+        result = self._try_gemini(prompt)
         if result:
+            print("[IMG] Provider: Gemini Imagen OK")
             return result
-        print("[IMG] Lexica failed, trying Picsum...")
+            
         result = self._try_picsum(prompt)
         if result:
+            print("[IMG] Provider: Picsum (fallback) WARNING")
             return result
+            
         print("[IMG] All providers failed. Using cinematic gradient fallback.")
         return self._make_fallback_image(prompt)
 
 
-    def generate_script_to_speech(self, tts_instance: TTS) -> str:
+    @staticmethod
+    def clean_script(text: str) -> str:
         """
-        Converts the generated script into Speech using KittenTTS and returns the path to the wav file.
+        Collapses the LLM output into a single flowing paragraph for TTS.
+        The LLM system prompt instructs it to use line breaks for dramatic pacing,
+        but those newlines must NOT reach the TTS engine — they cause unnatural
+        full-stop pauses and sentence fragmentation in the audio.
 
-        Args:
-            tts_instance (tts): Instance of TTS Class.
+        This function is applied to the script text ONLY.
+        Subtitle chunking happens separately from faster-whisper word timestamps.
+        """
+        import re
+        # Collapse all newlines (LLM dramatic line breaks) into a single space
+        text = re.sub(r'\n+', ' ', text)
+        # Collapse multiple spaces into one
+        text = re.sub(r' +', ' ', text)
+        # Strip leading/trailing whitespace
+        return text.strip()
+
+    def generate_script_to_speech(self) -> str:
+        """
+        Converts the generated script into Speech using edge-tts and returns the path to the mp3 file.
 
         Returns:
-            path_to_wav (str): Path to generated audio (WAV Format).
+            path_to_mp3 (str): Path to generated audio.
         """
-        path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".wav")
+        from classes.Tts import text_to_speech
+        
+        path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".mp3")
 
-        # Clean script, remove every character that is not a word character, a space, a period, a question mark, or an exclamation mark.
-        self.script = re.sub(r"[^\w\s.?!]", "", self.script)
+        # STEP 1 — Collapse LLM line-breaks into a single flowing paragraph.
+        # The LLM uses newlines for dramatic pacing in its output, but those newlines
+        # cause TTS to produce short fragments with unnatural stops (the reported bug).
+        self.script = self.clean_script(self.script)
 
-        tts_instance.synthesize(self.script, path)
+        # STEP 2 — Strip characters TTS engines handle poorly
+        # (commas are kept — edge-tts uses them for natural pauses between clauses)
+        self.script = re.sub(r"[^\w\s.,?!]", "", self.script)
+
+        # STEP 3 — Collapse any spaces introduced by the strip above
+        self.script = re.sub(r" +", " ", self.script).strip()
+
+        # STEP 4 — Print for visual validation before TTS
+        print("\n[TTS SCRIPT PREVIEW] " + "-" * 50)
+        print(self.script)
+        print("-" * 70 + "\n")
+
+        text_to_speech(self.script, path)
 
         self.tts_path = path
 
@@ -767,13 +840,19 @@ For context, here is the full script:
 
     def generate_subtitles_local_whisper(self, audio_path: str) -> str:
         """
-        Generates subtitles using local Whisper (faster-whisper).
+        Generates YouTube-Shorts-style subtitles using local faster-whisper word timestamps.
+
+        Groups words 4-5 at a time and writes an .ass file with:
+          - Arial Black / Impact, 85 px
+          - Pure white text with a thick 4-px black outline
+          - Semi-transparent dark pill background
+          - Vertically centred on screen (around 55 % height)
 
         Args:
-            audio_path (str): Audio file path
+            audio_path (str): Path to the audio file.
 
         Returns:
-            path (str): Path to SRT file
+            path (str): Path to the generated .ass file.
         """
         try:
             from faster_whisper import WhisperModel
@@ -786,86 +865,109 @@ For context, here is the full script:
 
         model = WhisperModel(
             get_whisper_model(),
-            device="cpu",  # Force CPU since CUDA is not installed
-            compute_type="int8",  # CPU only supports int8 compute for whisper models,
+            device="cpu",
+            compute_type="int8",
         )
         segments, _ = model.transcribe(audio_path, vad_filter=True, word_timestamps=True)
 
-        lines = []
-        idx = 1
+        # ── Collect all word-level timestamps ──────────────────────────────
+        words: list[tuple[float, float, str]] = []
         for segment in segments:
             if not hasattr(segment, "words") or not segment.words:
                 continue
-            for word in segment.words:
-                start = self._format_srt_timestamp(word.start)
-                end = self._format_srt_timestamp(word.end)
-                text = word.word.strip()
-                if not text:
-                    continue
-                lines.append(str(idx))
-                lines.append(f"{start} --> {end}")
-                lines.append(text.upper())   # uppercase looks cleaner for single words
-                lines.append("")
-                idx += 1
+            for w in segment.words:
+                text = w.word.strip()
+                if text:
+                    words.append((w.start, w.end, text.upper()))
 
-        subtitles = "\n".join(lines)
-        srt_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".srt")
-        with open(srt_path, "w", encoding="utf-8") as file:
-            file.write(subtitles)
+        # ── Group into max 4 words chunks ──────────────────────────────────
+        WORDS_PER_CUE = 4
+        cues: list[tuple[float, float, str]] = []
+        for i in range(0, len(words), WORDS_PER_CUE):
+            chunk = words[i : i + WORDS_PER_CUE]
+            cue_start = chunk[0][0]
+            cue_end   = chunk[-1][1]
+            cue_text  = " ".join(w[2] for w in chunk)
+            cues.append((cue_start, cue_end, cue_text))
 
-        return srt_path
+        # ── ASS timestamp helper ───────────────────────────────────────────
+        def _ass_ts(seconds: float) -> str:
+            """Convert float seconds → ASS timestamp H:MM:SS.cc"""
+            cs = int(round(seconds * 100))          # centiseconds
+            h  = cs // 360000;  cs %= 360000
+            m  = cs // 6000;    cs %= 6000
+            s  = cs // 100;     cs %= 100
+            return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+        # ── Build .ass file ────────────────────────────────────────────────
+        #
+        # Style breakdown:
+        #   Fontname  = Arial Black
+        #   Fontsize  = 85
+        #   PrimaryColour  = &H00FFFFFF  (white)
+        #   OutlineColour  = &H00000000  (black)
+        #   Bold      = -1 (true)
+        #   Outline   = 4  (thick black border)
+        #   Alignment = 2  (bottom-center)
+        #   MarginV   = 120 (sits above bottom edge)
+        #
+        ass_header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial Black,85,&H00FFFFFF,&H000000FF,&H00000000,&HAA000000,-1,0,0,0,100,100,2,0,4,4,0,2,60,60,120,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+        event_lines: list[str] = []
+        for (start, end, text) in cues:
+            # \N = hard line-break in ASS (not needed for single-line cues but kept for safety)
+            event_lines.append(
+                f"Dialogue: 0,{_ass_ts(start)},{_ass_ts(end)},Default,,0,0,0,,{text}"
+            )
+
+        ass_content = ass_header + "\n".join(event_lines) + "\n"
+
+        ass_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".ass")
+        with open(ass_path, "w", encoding="utf-8") as fh:
+            fh.write(ass_content)
+
+        print(f"[SUBS] Wrote {len(cues)} subtitle cues to: {ass_path}")
+        return ass_path
 
     def combine(self) -> str:
         """
-        Combines everything into the final video.
+        Combines everything into the final video, then burns in YouTube-Shorts-style
+        .ass subtitles using FFmpeg as a post-process pass.
 
         Returns:
-            path (str): The path to the generated MP4 File.
+            path (str): The path to the final MP4 file (with subtitles burned in).
         """
+        import subprocess
+        import shutil
+
         combined_image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".mp4")
         threads = get_threads()
         tts_clip = AudioFileClip(self.tts_path)
         max_duration = tts_clip.duration
+
         if not self.images and self.story_mode != "reddit":
             raise RuntimeError(
                 "No images were generated. Cannot combine video. "
                 "Check that your Gemini API key is valid and has image generation access."
             )
+
         req_dur = max_duration / len(self.images) if self.images else 0
-
-        # Make a generator that returns a TextClip when called with consecutive
-        highlight_words = [
-            "betrayed", "exposed", "revenge", "fired", "cheated",
-            "caught", "shocked", "insane", "crazy", "lost",
-            "ended", "friend", "lied", "secret", "truth", "jerk", "money"
-        ]
-        highlight_colors = ["#FF3131", "#00FF00", "#FFD700", "#FF6B00"] # Red, Green, Gold, Orange
-
-        def generator(txt):
-            # Strip punctuation and make lowercase for accurate matching
-            clean_word = "".join(c for c in txt if c.isalnum()).lower()
-            
-            if any(hw == clean_word for hw in highlight_words):
-                color = random.choice(highlight_colors)
-            else:
-                color = "white"
-                
-            return TextClip(
-                txt.upper(),
-                font=os.path.join(get_fonts_dir(), get_font()),
-                fontsize=100,
-                color=color,
-                stroke_color="black",
-                stroke_width=6,
-                size=(880, None),
-                method="caption",
-                align="center"
-            )
 
         print(colored("[+] Combining images...", "blue"))
 
-        
-        # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
+        # ── Build image / background clip ──────────────────────────────────
         clips = []
         tot_dur = 0
         if self.images:
@@ -876,8 +978,6 @@ For context, here is the full script:
                     clip = clip.set_fps(30)
                     clip = clip.resize(lambda t: 1 + 0.03 * t)
 
-                    # Not all images are same size,
-                    # so we need to resize them
                     if round((clip.w / clip.h), 4) < 0.5625:
                         if get_verbose():
                             info(f" => Resizing Image: {image_path} to 1080x1920")
@@ -899,63 +999,96 @@ For context, here is the full script:
                             y_center=clip.h / 2,
                         )
                     clip = clip.resize((1080, 1920))
-
-                    # FX (Fade In)
-                    # clip = clip.fadein(2)
-
                     clips.append(clip)
                     tot_dur += clip.duration
 
         final_clip = concatenate_videoclips(clips) if clips else None
         if final_clip:
             final_clip = final_clip.set_fps(30)
-        random_song = choose_random_song()
 
-        # Try to use gameplay background video
-        bg_clip = self.get_background_clip(tts_clip.duration)
-
-        subtitles = None
-        try:
-            subtitles_path = self.generate_subtitles(self.tts_path)
-            equalize_subtitles(subtitles_path, 10)
-            subtitles = SubtitlesClip(subtitles_path, generator)
-            subtitles = subtitles.set_pos(("center", 0.75), relative=True)
-        except Exception as e:
-            warning(f"Failed to generate subtitles: {e}")
-
-        random_song_clip = AudioFileClip(random_song).set_fps(44100)
-        random_song_clip = random_song_clip.fx(afx.volumex, 0.1)
-        comp_audio = CompositeAudioClip([tts_clip.set_fps(44100), random_song_clip])
+        random_song       = choose_random_song()
+        bg_clip           = self.get_background_clip(tts_clip.duration)
+        random_song_clip  = AudioFileClip(random_song).set_fps(44100)
+        random_song_clip  = random_song_clip.fx(afx.volumex, 0.1)
+        comp_audio        = CompositeAudioClip([tts_clip.set_fps(44100), random_song_clip])
 
         if bg_clip is not None:
-            # Use gameplay as background — ignore generated images
-            base_clip = bg_clip.set_audio(comp_audio)
-            base_clip = base_clip.set_duration(tts_clip.duration)
-            if subtitles is not None:
-                final_clip = CompositeVideoClip([base_clip, subtitles])
-            else:
-                final_clip = base_clip
+            base_clip  = bg_clip.set_audio(comp_audio)
+            base_clip  = base_clip.set_duration(tts_clip.duration)
+            final_clip = base_clip
         else:
             if final_clip is not None:
                 final_clip = final_clip.set_audio(comp_audio)
                 final_clip = final_clip.set_duration(tts_clip.duration)
-                if subtitles is not None:
-                    final_clip = CompositeVideoClip([final_clip, subtitles])
             else:
                 raise RuntimeError("No background video and no images available. Cannot combine video.")
 
-        final_clip.write_videofile(combined_image_path, threads=threads)
+        # ── Write raw video (NO subtitles yet) ────────────────────────────
+        raw_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + "_raw.mp4")
+        final_clip.write_videofile(raw_path, threads=threads)
+        print(f"[VIDEO] Raw video written: {raw_path}")
+
+        # ── Generate .ass subtitles and burn with FFmpeg ───────────────────
+        try:
+            ass_path = self.generate_subtitles(self.tts_path)
+            print(f"[SUBS] Burning .ass subtitles with FFmpeg: {ass_path}")
+
+            # Windows absolute paths with colons (C:\...) break FFmpeg filters.
+            # The bulletproof fix is to use only basenames and run FFmpeg inside the temp directory.
+            ass_basename = os.path.basename(ass_path)
+            raw_basename = os.path.basename(raw_path)
+            out_basename = os.path.basename(combined_image_path)
+            work_dir = os.path.dirname(ass_path)  # The .mp folder
+
+            ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+            ffmpeg_cmd = [
+                ffmpeg_bin,
+                "-y",                          # overwrite output
+                "-i", raw_basename,            # raw video
+                "-vf", f"ass={ass_basename}",  # burn .ass subtitles (no escaping needed for pure basename)
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",                  # near-lossless quality
+                "-c:a", "copy",                # keep audio untouched
+                out_basename,
+            ]
+
+            result = subprocess.run(
+                ffmpeg_cmd,
+                cwd=work_dir,                  # Execute inside .mp to avoid absolute path bugs
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                warning(f"[SUBS] FFmpeg subtitle burn failed:\n{result.stderr[-1000:]}")
+                # Fall back: just rename the raw video as the output
+                shutil.copy2(raw_path, combined_image_path)
+            else:
+                print("[SUBS] Subtitle burn complete.")
+
+            # Clean up the raw intermediate file
+            try:
+                os.remove(raw_path)
+            except OSError:
+                pass
+
+        except Exception as e:
+            warning(f"[SUBS] Subtitle generation/burn failed ({type(e).__name__}: {e}). Using raw video.")
+            if os.path.exists(raw_path):
+                shutil.copy2(raw_path, combined_image_path)
+                try:
+                    os.remove(raw_path)
+                except OSError:
+                    pass
 
         success(f'Wrote Video to "{combined_image_path}"')
-
         return combined_image_path
 
-    def generate_video(self, tts_instance: TTS) -> str:
+    def generate_video(self) -> str:
         """
         Generates a YouTube Short based on the provided niche and language.
-
-        Args:
-            tts_instance (TTS): Instance of TTS Class.
 
         Returns:
             path (str): The path to the generated MP4 File.
@@ -981,7 +1114,7 @@ For context, here is the full script:
             print("[VIDEO] Reddit mode — skipping image generation, using background video instead.")
 
         # Generate the TTS
-        self.generate_script_to_speech(tts_instance)
+        self.generate_script_to_speech()
 
         # Combine everything
         path = self.combine()
@@ -1017,19 +1150,70 @@ For context, here is the full script:
 
         return channel_id
 
-    def _clear_contenteditable(self, driver, element) -> None:
-        """
-        Clears a contenteditable div using keyboard shortcuts.
-        Plain .clear() does NOT work on YouTube Studio's contenteditable divs.
-        """
+    def _safe_click_and_clear(self, driver, element):
+        """Click element safely, dismissing any autocomplete dropdowns first."""
         from selenium.webdriver.common.keys import Keys
         from selenium.webdriver.common.action_chains import ActionChains
-        element.click()
-        time.sleep(0.3)
-        ActionChains(driver).key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL).perform()
-        time.sleep(0.2)
-        ActionChains(driver).send_keys(Keys.DELETE).perform()
-        time.sleep(0.2)
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
+        try:
+            # Step 1: Press Escape to dismiss any open dropdown first
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.5)
+            
+            # Step 2: Wait for any suggestion dropdowns to disappear
+            try:
+                WebDriverWait(driver, 3).until(
+                    EC.invisibility_of_element_located(
+                        (By.TAG_NAME, "ytcp-hashtag-suggestion")
+                    )
+                )
+            except:
+                pass  # If it times out, continue anyway
+            
+            # Step 3: Scroll element into view
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", element
+            )
+            time.sleep(0.3)
+            
+            # Step 4: Use JavaScript click instead of Selenium click
+            # JS click bypasses overlay/intercept issues entirely
+            driver.execute_script("arguments[0].click();", element)
+            print("[UPLOAD] Field clicked via JS ✅")
+            time.sleep(0.3)
+            
+            # Step 5: Clear existing content with Ctrl+A then Delete
+            ActionChains(driver)\
+                .key_down(Keys.CONTROL)\
+                .send_keys('a')\
+                .key_up(Keys.CONTROL)\
+                .send_keys(Keys.DELETE)\
+                .perform()
+            time.sleep(0.3)
+            print("[UPLOAD] Dropdown dismissed & field cleared ✅")
+            
+        except Exception as e:
+            print(f"[UPLOAD] Safe click failed: {e}")
+            raise
+
+    def _safe_type_text(self, driver, element, text: str):
+        """Type text into a contenteditable field character by character 
+           with dropdown dismissal between chunks."""
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.common.action_chains import ActionChains
+        
+        # Type in chunks of 30 chars, dismissing dropdown after each chunk
+        chunk_size = 30
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i+chunk_size]
+            element.send_keys(chunk)
+            time.sleep(0.2)
+            
+            # Dismiss dropdown after every chunk
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.2)
 
     def upload_video(self) -> bool:
         """
@@ -1074,31 +1258,51 @@ For context, here is the full script:
             print("[UPLOAD] Upload modal appeared")
             time.sleep(2)  # let all textboxes render fully
 
-            # YouTube Studio textboxes are contenteditable divs (NOT <input>)
-            # .clear() is a no-op on these; use keyboard shortcuts instead
-            textboxes = driver.find_elements(By.XPATH, "//div[@id='textbox']")
-            print(f"[UPLOAD] Found {len(textboxes)} textbox(es)")
+            from selenium.common.exceptions import ElementClickInterceptedException
+            from selenium.webdriver.common.keys import Keys
+            from selenium.webdriver.common.action_chains import ActionChains
 
-            if len(textboxes) < 1:
-                raise RuntimeError("Could not find title/description textboxes in YouTube Studio. The UI may have changed.")
-
-            title_el = textboxes[0]
-            description_el = textboxes[1] if len(textboxes) > 1 else textboxes[0]
-
-            if verbose:
-                info("\t=> Setting title...")
-
-            self._clear_contenteditable(driver, title_el)
-            title_el.send_keys(self.metadata["title"])
-            print(f"[UPLOAD] Title set to: {self.metadata['title']}")
-
-            if verbose:
-                info("\t=> Setting description...")
-
-            time.sleep(1)
-            self._clear_contenteditable(driver, description_el)
-            description_el.send_keys(self.metadata["description"])
-            print("[UPLOAD] Description set")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # YouTube Studio textboxes are contenteditable divs (NOT <input>)
+                    # .clear() is a no-op on these; use keyboard shortcuts instead
+                    textboxes = driver.find_elements(By.XPATH, "//div[@id='textbox']")
+                    if len(textboxes) < 1:
+                        raise RuntimeError("Could not find title/description textboxes in YouTube Studio. The UI may have changed.")
+        
+                    title_el = textboxes[0]
+                    description_el = textboxes[1] if len(textboxes) > 1 else textboxes[0]
+        
+                    if verbose:
+                        info("\t=> Setting title...")
+        
+                    self._safe_click_and_clear(driver, title_el)
+                    self._safe_type_text(driver, title_el, self.metadata["title"])
+                    print(f"[UPLOAD] Title set to: {self.metadata['title']}")
+        
+                    if verbose:
+                        info("\t=> Setting description...")
+        
+                    # Wait for upload modal to fully settle before touching description
+                    time.sleep(2)
+                    # Dismiss any lingering dropdowns
+                    ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    time.sleep(0.5)
+        
+                    self._safe_click_and_clear(driver, description_el)
+                    print("[UPLOAD] Description field clicked via JS ✅")
+                    
+                    self._safe_type_text(driver, description_el, self.metadata["description"])
+                    print("[UPLOAD] Description text typed successfully ✅")
+                    
+                    break  # success
+                except ElementClickInterceptedException as e:
+                    print(f"[UPLOAD] Click intercepted, attempt {attempt+1}/{max_retries}, retrying...")
+                    ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    time.sleep(2)
+                    if attempt == max_retries - 1:
+                        raise  # give up after 3 tries
 
             time.sleep(0.5)
 

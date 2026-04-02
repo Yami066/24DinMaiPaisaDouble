@@ -1,18 +1,26 @@
 import os
-import soundfile as sf
-from kittentts import KittenTTS as KittenModel
+import asyncio
+import edge_tts
+from config import ROOT_DIR
 
-from config import ROOT_DIR, get_tts_voice
+# Alternative high-quality edge-tts voices:
+# "en-US-GuyNeural" — conversational male
+# "en-US-JennyNeural" — clear female
+# "en-US-AriaNeural" — expressive female
 
-KITTEN_MODEL = "KittenML/kitten-tts-mini-0.8"
-KITTEN_SAMPLE_RATE = 24000
+async def generate_voice(text: str, output_path: str):
+    voice = "en-US-ChristopherNeural"  # Deep male narrator voice (default)
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_path)
 
-class TTS:
-    def __init__(self) -> None:
-        self._model = KittenModel(KITTEN_MODEL)
-        self._voice = get_tts_voice()
+def text_to_speech(text: str, output_path: str = None) -> str:
+    """
+    Synchronous wrapper for edge-tts generation.
+    Returns the output path (defaults to .mp/audio.mp3).
+    """
+    if output_path is None:
+        output_path = os.path.join(ROOT_DIR, ".mp", "audio.mp3")
+        
+    asyncio.run(generate_voice(text, output_path))
+    return output_path
 
-    def synthesize(self, text, output_file=os.path.join(ROOT_DIR, ".mp", "audio.wav")):
-        audio = self._model.generate(text, voice=self._voice)
-        sf.write(output_file, audio, KITTEN_SAMPLE_RATE)
-        return output_file

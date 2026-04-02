@@ -8,7 +8,6 @@ from config import *
 from status import *
 from uuid import uuid4
 from constants import *
-from classes.Tts import TTS
 from termcolor import colored
 from classes.Twitter import Twitter
 from classes.YouTube import YouTube
@@ -161,7 +160,6 @@ def main():
                     except ValueError:
                         warning("Please enter a number.")
                         continue
-                    tts = TTS()
 
                     if user_input == 1:
                         # Story source selection menu
@@ -182,7 +180,7 @@ def main():
                             warning("Invalid choice, defaulting to Ollama")
                             youtube.set_story_mode("ollama")
 
-                        youtube.generate_video(tts)
+                        youtube.generate_video()
 
                         upload_to_yt = question("Do you want to upload this video to YouTube? (Yes/No): ")
                         if upload_to_yt.lower() == "yes":
