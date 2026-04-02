@@ -1,11 +1,40 @@
-@"
+# virtual env
 venv/
-.mp/
-.vscode/
+
+# python cache
 __pycache__/
 *.pyc
 
-# Firefox profile data
+# vscode
+.vscode/
+.idea/
+
+# local config
+config.json
+.env
+
+# temporary prompt files
+tmp_prompt_*.py
+tmp_prompt_*.txt
+tmp_prompt_*.json
+
+# ffmpeg binaries (local only)
+ffmpeg.exe
+ffprobe.exe
+
+# generated media
+*.mp3
+*.mp4
+*.wav
+output_videos/
+.mp/
+
+# large assets (optional)
+assets/backgrounds/
+assets/music/
+assets/Songs/
+
+# firefox profile / selenium session
 datareporting/
 glean/
 cache2/
@@ -25,19 +54,17 @@ storage/
 thumbnails/
 bookmarkbackups/
 
-# Large media assets
-assets/backgrounds/
-assets/music/
-assets/Songs/
-output_videos/
-
-# Firefox files
+*.mozlz4
+*.jsonlz4
+*.lz4
+sessionstore*
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite-journal
 *.db
-*.lz4
 *.bin
+
 prefs.js
 user.js
 xulstore.json
@@ -46,19 +73,24 @@ sessionCheckpoints.json
 handlers.json
 containers.json
 broadcast-listeners.json
+
+compatibility.ini
+pkcs11.txt
+extensions.json
+ExperimentStoreData.json
+activity-stream*
+shield-preference*
+
 geckodriver.log
 parent.lock
 
-# Docs
+# system files
+Thumbs.db
+.DS_Store
+
 docs/
-
-# Temp files
-tmp_prompt_*.py
-tmp_prompt_*.txt
-tmp_prompt_*.json
-
-# Binaries
-ffmpeg.exe
-ffprobe.exe
-config.json
-"@ | Set-Content .gitignore
+Songs/
+AGENTS.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+technical_breakdown.md
