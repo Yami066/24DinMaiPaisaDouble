@@ -104,13 +104,17 @@ class YouTube:
         self.options.add_argument("-profile")
         self.options.add_argument(self._fp_profile_path)
 
-        # Set the service
-        self.service: Service = Service(GeckoDriverManager().install())
+        # Initialize the browser variables (lazy instantiation)
+        self.service = None
+        self.browser = None
 
-        # Initialize the browser
-        self.browser: webdriver.Firefox = webdriver.Firefox(
-            service=self.service, options=self.options
-        )
+    def _init_browser(self):
+        """Lazily initializes the Selenium WebDriver."""
+        if self.browser is None:
+            self.service = Service(GeckoDriverManager().install())
+            self.browser = webdriver.Firefox(
+                service=self.service, options=self.options
+            )
 
     def __enter__(self):
         return self
@@ -1426,6 +1430,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         Returns:
             channel_id (str): The Channel ID.
         """
+        if self.browser is None:
+            self._init_browser()
+            
         driver = self.browser
         driver.get("https://studio.youtube.com")
         time.sleep(2)
@@ -1514,6 +1521,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             print(f"[UPLOAD] video_path = {self.video_path}")
             print(f"[UPLOAD] file exists = {os.path.exists(self.video_path)}")
+
+            if self.browser is None:
+                self._init_browser()
 
             self.get_channel_id()
 
