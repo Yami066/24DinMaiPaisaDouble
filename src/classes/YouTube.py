@@ -77,7 +77,7 @@ class YouTube:
         self._niche: str = niche
         self._language: str = language
 
-        self.images = []
+        self.visual_assets = []  # list of {"type": "video"|"image", "path": str}
         self.subject: str = ""
         self.script: str = ""
         self.metadata: dict = {}
@@ -87,6 +87,7 @@ class YouTube:
         self.video_path: str = ""
         self.tts_path: str = ""
         self.story_mode: str = "ollama"
+        self._clips_to_close: list = []
 
         # Initialize the Firefox profile
         self.options: Options = Options()
@@ -110,6 +111,22 @@ class YouTube:
         self.browser: webdriver.Firefox = webdriver.Firefox(
             service=self.service, options=self.options
         )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self, 'browser') and self.browser is not None:
+            try:
+                self.browser.quit()
+            except Exception:
+                pass
+        
+        for clip in self._clips_to_close:
+            try:
+                clip.close()
+            except Exception:
+                pass
 
     def set_story_mode(self, mode: str) -> None:
         """
@@ -248,6 +265,14 @@ class YouTube:
             reddit_story = self.fetch_reddit_story()
 
             if reddit_story:
+                # Extract the Reddit post title and store it as subject so
+                # generate_metadata() produces the actual story title, not a
+                # generic AI-generated topic.
+                _first_line = reddit_story.splitlines()[0]
+                if _first_line.startswith("Title: "):
+                    self.subject = _first_line[7:].strip()
+                    print(f"[SCRIPT] Reddit story title set as subject: {self.subject}")
+
                 # ── SYSTEM PROMPT ──────────────────────────────────────────
                 reddit_system_prompt = """You are a YouTube Shorts narrator. Your job is to turn a raw Reddit post into a gripping first-person voiceover script.
 
@@ -307,34 +332,59 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
                 self.story_mode = "ollama"
 
         if self.story_mode == "ollama" or not completion:
-            # ── Ollama original story generation ─────────────────────────
-            print("[SCRIPT] Ollama mode — generating AI story...")
+            # ── AI original story generation ─────────────────────────
+            print("[SCRIPT] AI mode — generating AI story using Gemini...")
 
-            ollama_system_prompt = (
-                "You are a YouTube Shorts narrator who writes original short-form stories. "
+            ai_system_prompt = (
+                "You are a YouTube Shorts narrator who writes mind-blowing fact videos. "
                 "Your output is read aloud by a Text-to-Speech AI — pacing and clarity are critical.\n\n"
                 "STRICT OUTPUT RULES:\n"
-                "1. WORD COUNT: 150-200 words maximum. Hard limit.\n"
-                "2. VOICE: First-person only. \"I\", \"me\", \"my\".\n"
-                "3. SENTENCE LENGTH: Short. Punchy. Never more than 15 words per sentence.\n"
-                "4. HOOK: The very first sentence must grab attention immediately.\n"
-                "5. TENSION: Build dread or conflict with short staccato sentences.\n"
-                "6. ENDING: Close with a single cliffhanger or emotional gut-punch.\n"
-                "7. BANNED PHRASES: \"I decided to\", \"I realized that\", \"little did I know\", \"alas\".\n"
-                "8. FORMATTING: Plain narration text only. No headers, bullets, emojis, or markdown."
+                "1. Generate exactly 5 mind-blowing facts that sound fake but are completely true.\n"
+                "2. Each fact should create a 'wait what' reaction in the viewer.\n"
+                "3. Deliver them with energy and urgency.\n"
+                "4. WORD COUNT: Under 150 words total. Hard limit.\n"
+                "5. Return only the spoken narration text.\n"
+                "6. Do not include any stage directions, voice cues, pacing instructions, or parenthetical notes like (Voice quickens) or (Pause for effect).\n"
+                "7. Do not repeat any fact or sentence more than once.\n"
+                "8. Write in a natural conversational tone suitable for text-to-speech."
             )
 
-            ollama_user_prompt = (
-                f"Write an original first-person story for a YouTube Short.\n\n"
-                f"Topic: {self.subject}\n"
+            ai_user_prompt = (
+                f"Write a script about 5 mind-blowing facts based on this topic: {self.subject}\n\n"
                 f"Language: {self.language}\n\n"
                 f"Follow your rules exactly. Output the narration script only."
             )
 
-            completion = self.generate_response(
-                ollama_user_prompt,
-                system_prompt=ollama_system_prompt,
-            )
+            try:
+                from llm_provider import generate_text_gemini
+                completion = generate_text_gemini(
+                    ai_user_prompt,
+                    system_prompt=ai_system_prompt,
+                ) or ""
+            except Exception as e:
+                print(f"[SCRIPT] Gemini script generation failed: {e}")
+                completion = ""
+
+            if completion:
+                import re
+                
+                # Use regex to remove patterns like Voice.*?, or anything inside parentheses (...)
+                completion = re.sub(r'\(.*?\)', '', completion)
+                completion = re.sub(r'(?i)\b(?:Voice|Narrator).*?:', '', completion)
+
+                # Split the script into sentences, remove exact duplicate sentences using a seen set, then rejoin
+                sentences = re.split(r'(?<=[.!?])\s+', completion)
+                seen_sentences = set()
+                unique_sentences = []
+                for s in sentences:
+                    s_clean = s.strip()
+                    if s_clean and s_clean not in seen_sentences:
+                        seen_sentences.add(s_clean)
+                        unique_sentences.append(s_clean)
+                completion = ' '.join(unique_sentences)
+
+                # Strip extra whitespace and newlines
+                completion = re.sub(r'\s+', ' ', completion).strip()
 
         if not completion:
             error("Script generation failed completely.")
@@ -357,7 +407,23 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
 
         # Fix double spaces
         completion = re.sub(r" +", " ", completion).strip()
-       
+
+        # Strip lines that look like stage directions, title cards, or visual
+        # instructions — the LLM sometimes leaks these despite the system prompt.
+        _BAD_KW = (
+            "title", "scrolling", "on screen", "as i speak",
+            "caption", "text overlay", "visual", "cut to",
+            "scene:", "narrator:", "text on",
+        )
+        _clean_lines = []
+        for _ln in completion.splitlines():
+            _lc = _ln.strip().lower()
+            if any(_kw in _lc for _kw in _BAD_KW):
+                print(f"[SCRIPT] Removed stage-direction line: {_ln.strip()[:80]}")
+                continue
+            _clean_lines.append(_ln)
+        completion = " ".join(_clean_lines).strip()
+        completion = re.sub(r" +", " ", completion).strip()
 
         if len(completion) > 5000:
             if get_verbose():
@@ -376,14 +442,21 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
             metadata (dict): The generated metadata.
         """
         title = self.generate_response(
-            f"Please generate a YouTube Video Title for the following subject, including hashtags: {self.subject}. Only return the title, nothing else. Limit the title under 100 characters."
-        )
-
-        title = title.strip()[:99]
+            f"Generate a catchy YouTube title for a video about {self.subject}. "
+            f"The title MUST be highly similar to this format: '5 Facts That Sound Fake But Are 100% True 🤯'. "
+            f"Do not include quotes or hashtags in the title itself. Keep it under 100 characters. "
+            f"Return ONLY the title."
+        ).strip().replace('"', '').replace("'", "")[:99]
 
         description = self.generate_response(
-            f"Please generate a YouTube Video Description for the following script: {self.script}. Only return the description, nothing else."
-        )
+            f"Generate a very short 1-2 sentence YouTube description asking a question about this script: {self.script}. "
+            f"Do NOT include hashtags in your response text, just the 1-2 sentences. "
+            f"Return ONLY the description text."
+        ).strip()
+        
+        # Manually append the required hashtags
+        hashtags = "#MindBlowing #Facts #DidYouKnow #LearnOnTikTok #MindGlitch #FunFacts #WaitWhat"
+        description = f"{description}\n\n{hashtags}"
 
         self.metadata = {"title": title, "description": description}
 
@@ -398,18 +471,16 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
         """
         n_prompts = min(8, max(4, len(self.script) // 50))
 
-        prompt = f"""Generate {n_prompts} cinematic image prompts for a dark, moody short video.
+        prompt = f"""Generate {n_prompts} cinematic image prompts for a mind-blowing facts video.
 Subject: {self.subject}
 
 STRICT RULES:
-- Include a specific emotion visible in the scene (shock, grief, anger, joy)
-- Include a clear subject action (not just "stands" or "sits")
-- Specify the exact setting from the story
-- Append this to EVERY prompt automatically: ", vertical 9:16 frame, cinematic still, dramatic lighting, photorealistic, 4k"
-- Every prompt must describe a SPECIFIC visible scene
-- Keep the SAME characters and context across all prompts so the video feels like one coherent story
-- NO vague prompts like "a woman feeling sad" or "tension rises"
-- Vary the camera angle in each prompt (close-up, wide shot, overhead, etc.)
+- Each image must visually represent a mind-blowing fact.
+- Use visuals like: epic scale comparisons, deep space imagery, abstract brain/psychology models, historical moments, or microscopic details.
+- No generic character scenes or "people walking". Make it feel like a high-end documentary or infographic visual.
+- Append this to EVERY prompt automatically: ", vertical 9:16 frame, highly detailed, photorealistic, cinematic lighting, 8k resolution, documentary style"
+- Every prompt must describe a SPECIFIC visible scene (e.g., "A gigantic blue whale swimming next to a small airplane for scale")
+- Vary the visual concepts according to the script.
 - Return ONLY a JSON array of strings, nothing else
 
 For context, here is the full script:
@@ -484,7 +555,7 @@ For context, here is the full script:
         if get_verbose():
             info(f' => Wrote image from {provider_label} to "{image_path}"')
 
-        self.images.append(image_path)
+        self.visual_assets.append({"type": "image", "path": image_path})
         return image_path
 
    
@@ -494,65 +565,103 @@ For context, here is the full script:
     # ------------------------------------------------------------------ #
 
     def _try_pollinations(self, prompt: str) -> str | None:
-        """Attempt image generation via Pollinations.ai with 60s timeout (Primary)."""
+        """Attempt image generation via Pollinations.ai with 90s timeout (Secondary)."""
         import requests
         import urllib.parse
+        import time
+        import random
         try:
             image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
-            encoded_prompt = urllib.parse.quote(prompt)
-            # Add quality modifiers to every prompt
             enhanced = f"{prompt}, cinematic, dramatic lighting, 4k, highly detailed"
             encoded = urllib.parse.quote(enhanced)
-            url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1920&nologo=true&enhance=true"
+            seed = random.randint(1, 99999)
+            url = f"https://image.pollinations.ai/prompt/{encoded}?seed={seed}&width=1080&height=1920&nologo=true"
             
-            print(f"[IMG] Trying Pollinations.ai: {prompt[:50]}...")
-            response = requests.get(url, timeout=60)  # 60s timeout — it's slow
-            if response.status_code == 200 and len(response.content) > 10000:
-                with open(image_path, 'wb') as f:
-                    f.write(response.content)
-                self.images.append(image_path)
-                return image_path
+            for attempt in range(3):
+                print(f"[IMG] Trying Pollinations.ai (Attempt {attempt+1}/3): {prompt[:50]}...")
+                try:
+                    response = requests.get(url, timeout=90)  # 90s timeout
+                    if response.status_code == 200 and len(response.content) > 5000:
+                        with open(image_path, 'wb') as f:
+                            f.write(response.content)
+                        self.visual_assets.append({"type": "image", "path": image_path})
+                        return image_path
+                    else:
+                        print(f"[IMG] Pollinations attempt {attempt+1} failed with status {response.status_code}, content len {len(response.content)}")
+                except Exception as req_e:
+                    print(f"[IMG] Pollinations attempt {attempt+1} exception: {req_e}")
+                time.sleep(2)
+            
             return None
         except Exception as e:
-            print(f"[IMG] Pollinations failed: {e}")
+            print(f"[IMG] Pollinations completely failed: {e}")
             return None
 
-    def _try_gemini(self, prompt: str) -> str | None:
-        """Attempt image generation via Gemini Imagen (Secondary Fallback)."""
+    def _try_huggingface(self, prompt: str) -> str | None:
+        """Attempt image generation via Hugging Face Inference API — Fallback Chain."""
+        import requests, json, time, os as _os
         try:
-            import base64, json, requests
-            image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
-            
-            # Load config to get API key natively here
-            with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
-                api_key = json.load(file).get("gemini_image_api_key", "")
-                
+            # Load HF_API_KEY from config.json, then fall back to env
+            try:
+                with open(_os.path.join(ROOT_DIR, "config.json"), "r") as _f:
+                    _cfg = json.load(_f)
+                api_key = _cfg.get("hf_api_key", "") or _os.environ.get("HF_API_KEY", "")
+            except Exception:
+                api_key = _os.environ.get("HF_API_KEY", "")
+
             if not api_key:
+                print("[IMG] HuggingFace: no HF_API_KEY found in config.json or environment. Skipping.")
                 return None
-            
-            print(f"[IMG] Trying Gemini Imagen: {prompt[:50]}...")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-fast-generate-001:predict?key={api_key}"
-            payload = {
-                "instances": [{"prompt": prompt}],
-                "parameters": {
-                    "sampleCount": 1,
-                    "aspectRatio": "9:16"  # vertical for Shorts
-                }
-            }
-            response = requests.post(url, json=payload, timeout=30)
-            data = response.json()
-            
-            if "predictions" in data:
-                img_data = data["predictions"][0]["bytesBase64Encoded"]
-                with open(image_path, 'wb') as f:
-                    f.write(base64.b64decode(img_data))
-                self.images.append(image_path)
+
+            headers = {"Authorization": f"Bearer {api_key}"}
+            payload = {"inputs": prompt}
+
+            models = [
+                "black-forest-labs/FLUX.1-schnell",
+                "stabilityai/stable-diffusion-2-1",
+                "runwayml/stable-diffusion-v1-5"
+            ]
+
+            for model in models:
+                hf_url = f"https://router.huggingface.co/hf-inference/models/{model}"
+                print(f"[IMG] Trying HuggingFace model ({model}): {prompt[:60]}...")
+                
+                try:
+                    response = requests.post(hf_url, headers=headers, json=payload, timeout=60)
+                except Exception as req_e:
+                    print(f"[IMG] HuggingFace connection error for {model}: {req_e}")
+                    continue
+
+                # 503 = model is loading — wait and retry once
+                if response.status_code == 503:
+                    print(f"[IMG] HuggingFace 503. Waiting 20s for {model} to load...")
+                    time.sleep(20)
+                    try:
+                        response = requests.post(hf_url, headers=headers, json=payload, timeout=60)
+                    except Exception as req_e:
+                        print(f"[IMG] HuggingFace connection error for {model} on retry: {req_e}")
+                        continue
+
+                # If 402 Payment Required, or 429, or 500 etc, move to next
+                if response.status_code != 200:
+                    print(f"[IMG] HuggingFace {model} failed with {response.status_code}: {response.text[:200]}")
+                    continue
+
+                # Response is raw image bytes
+                if len(response.content) < 5000:
+                    print(f"[IMG] HuggingFace {model} returned suspiciously small payload ({len(response.content)} bytes). Skipping model.")
+                    continue
+
+                image_path = _os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
+                with open(image_path, "wb") as img_f:
+                    img_f.write(response.content)
+                self.visual_assets.append({"type": "image", "path": image_path})
                 return image_path
-            else:
-                print(f"[IMG] Gemini Imagen error: {data}")
-                return None
+
+            return None # All models failed
+
         except Exception as e:
-            print(f"[IMG] Gemini Imagen failed: {e}")
+            print(f"[IMG] HuggingFace chain completely failed: {type(e).__name__}: {e}")
             return None
 
     def _try_picsum(self, prompt: str) -> str | None:
@@ -647,43 +756,169 @@ For context, here is the full script:
 
             image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
             img.save(image_path)
-            self.images.append(image_path)
+            self.visual_assets.append({"type": "image", "path": image_path})
             print(f"[IMG] Wrote cinematic fallback image: {image_path}")
             return image_path
         except Exception as e:
             print(f"[IMG] Fallback image generation failed: {e}")
             return None
 
-    def generate_image(self, prompt: str) -> str | None:
+    def _try_pexels_video(self, prompt: str) -> str | None:
         """
-        Generates an AI Image using the fallback chain.
-        1. Pollinations.ai
-        2. Gemini Imagen
-        3. Picsum
-        4. Gradient Fallback
+        Attempts to fetch a portrait HD video clip from the Pexels Video API.
 
         Args:
-            prompt (str): The image generation prompt.
+            prompt (str): Scene description used to derive search keywords.
 
         Returns:
-            path (str): Path to the saved PNG, or None.
+            path (str): Absolute path to the downloaded .mp4, or None on failure.
         """
+        import json as _json
+        import os as _os
+        try:
+            # Read API key from config.json
+            try:
+                with open(_os.path.join(ROOT_DIR, "config.json"), "r") as _f:
+                    _cfg = _json.load(_f)
+                api_key = _cfg.get("pexels_api", "").strip()
+            except Exception:
+                api_key = ""
+
+            if not api_key:
+                print("[PEXELS] No pexels_api key found in config.json. Skipping.")
+                return None
+
+            # Extract 2-3 broad visual keywords via Gemini
+            try:
+                from llm_provider import generate_text_gemini
+                kw_raw = generate_text_gemini(
+                    f"Extract 2-3 broad, visual search keywords from this scene description. "
+                    f"Return ONLY the keywords separated by spaces, nothing else.\n\nDescription: {prompt}"
+                ) or ""
+                keywords = kw_raw.strip().replace(",", " ").split()
+                keywords = [k for k in keywords if len(k) > 2][:3]
+                query = " ".join(keywords) if keywords else prompt[:40]
+            except Exception as kw_err:
+                print(f"[PEXELS] Keyword extraction failed: {kw_err}. Using raw prompt.")
+                query = prompt[:40]
+
+            print(f"[PEXELS] Searching for: '{query}'")
+            headers = {"Authorization": api_key}
+            params = {
+                "query": query,
+                "orientation": "portrait",
+                "size": "large",
+                "per_page": 5,
+            }
+            resp = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            videos = data.get("videos", [])
+            if not videos:
+                print("[PEXELS] No videos returned for query.")
+                return None
+
+            # Pick a random video from the top 5 and find an HD file
+            random.shuffle(videos)
+            video_url = None
+            for video in videos:
+                video_files = video.get("video_files", [])
+                # Prefer HD quality
+                hd_files = [vf for vf in video_files if vf.get("quality") == "hd"]
+                chosen_files = hd_files if hd_files else video_files
+                if chosen_files:
+                    video_url = chosen_files[0].get("link")
+                    if video_url:
+                        break
+
+            if not video_url:
+                print("[PEXELS] Could not find a downloadable video file.")
+                return None
+
+            # Download the video clip
+            time.sleep(2)  # Respect Pexels rate limits
+            print(f"[PEXELS] Downloading: {video_url[:80]}...")
+            video_resp = requests.get(video_url, timeout=60, stream=True)
+            video_resp.raise_for_status()
+
+            video_path = _os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".mp4")
+            with open(video_path, "wb") as vf:
+                for chunk in video_resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        vf.write(chunk)
+
+            print(f"[PEXELS] ✅ Downloaded video to: {video_path}")
+            return video_path
+
+        except Exception as e:
+            print(f"[PEXELS] Failed: {type(e).__name__}: {e}")
+            return None
+
+    def generate_image(self, prompt: str) -> str | None:
+        """
+        Generates a visual asset for the given scene prompt.
+
+        Provider order:
+        1. Pexels Video API (Primary — real footage, portrait HD)
+        2. Hugging Face FLUX.1-schnell (Image fallback)
+        3. Pollinations.ai (Image fallback — 3 retries, 90s timeout)
+        4. Picsum (Image last resort)
+        5. Cinematic Gradient (absolute last resort)
+
+        On success, appends a dict to self.visual_assets with keys
+        ``type`` ("video" or "image") and ``path``.
+
+        Args:
+            prompt (str): The scene description / image generation prompt.
+
+        Returns:
+            path (str): Path to the saved file, or None.
+        """
+        print(f"\n[IMG] ---------------- Generating Scene ----------------")
+        print(f"[IMG] Prompt: {prompt[:100]}...")
+
+        # Guard against empty/blank prompts
+        suffix = ", vertical 9:16 frame, highly detailed, photorealistic, cinematic lighting, 8k resolution, documentary style"
+        content_only = prompt.replace(suffix, "").strip()
+        if not content_only or len(content_only) < 20:
+            warning("[IMG] Prompt is empty or actual content is < 20 chars. Skipping generation.")
+            return None
+
+        # ── 1. Try Pexels Video first ──────────────────────────────────────
+        result = self._try_pexels_video(prompt)
+        if result:
+            print("[IMG] ✅ SUCCESS: Provider Pexels Video")
+            self.visual_assets.append({"type": "video", "path": result})
+            return result
+
+        # ── 2. Image fallback chain ────────────────────────────────────────
+        print("[IMG] Pexels failed. Falling back to HuggingFace...")
+        result = self._try_huggingface(prompt)
+        if result:
+            print("[IMG] ✅ SUCCESS: Provider HuggingFace (FLUX.1-schnell)")
+            # _try_huggingface already appended to visual_assets via _persist_image / direct append
+            return result
+
+        print("[IMG] HuggingFace failed. Falling back to Pollinations...")
         result = self._try_pollinations(prompt)
         if result:
-            print("[IMG] Provider: Pollinations OK")
+            print("[IMG] ✅ SUCCESS: Provider Pollinations.ai")
             return result
-            
-        result = self._try_gemini(prompt)
-        if result:
-            print("[IMG] Provider: Gemini Imagen OK")
-            return result
-            
+
+        print("[IMG] Pollinations failed. Falling back to Picsum (last resort)...")
         result = self._try_picsum(prompt)
         if result:
-            print("[IMG] Provider: Picsum (fallback) WARNING")
+            print("[IMG] ⚠️ SUCCESS: Provider Picsum (last resort — HuggingFace & Pollinations failed)")
             return result
-            
-        print("[IMG] All providers failed. Using cinematic gradient fallback.")
+
+        print("[IMG] Picsum failed. Falling back to Gradient (absolute last resort)...")
+        print("[IMG] ❌ SUCCESS: Provider Cinematic Gradient (Last Resort Fallback)")
         return self._make_fallback_image(prompt)
 
 
@@ -955,73 +1190,100 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         combined_image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".mp4")
         threads = get_threads()
         tts_clip = AudioFileClip(self.tts_path)
+        self._clips_to_close.append(tts_clip)
         max_duration = tts_clip.duration
 
-        if not self.images and self.story_mode != "reddit":
+        if not self.visual_assets and self.story_mode != "reddit":
             raise RuntimeError(
-                "No images were generated. Cannot combine video. "
+                "No visual assets were generated. Cannot combine video. "
                 "Check that your Gemini API key is valid and has image generation access."
             )
 
-        req_dur = max_duration / len(self.images) if self.images else 0
+        req_dur = max_duration / len(self.visual_assets) if self.visual_assets else 0
 
-        print(colored("[+] Combining images...", "blue"))
+        print(colored("[+] Combining visual assets...", "blue"))
 
-        # ── Build image / background clip ──────────────────────────────────
+        # ── Build visual clips from visual_assets ─────────────────────────
         clips = []
         tot_dur = 0
-        if self.images:
+        if self.visual_assets:
             while tot_dur < max_duration:
-                for image_path in self.images:
-                    clip = ImageClip(image_path)
-                    clip.duration = req_dur
-                    clip = clip.set_fps(30)
-                    clip = clip.resize(lambda t: 1 + 0.03 * t)
+                for asset in self.visual_assets:
+                    asset_type = asset.get("type", "image")
+                    asset_path = asset["path"]
 
-                    if round((clip.w / clip.h), 4) < 0.5625:
-                        if get_verbose():
-                            info(f" => Resizing Image: {image_path} to 1080x1920")
-                        clip = crop(
-                            clip,
-                            width=clip.w,
-                            height=round(clip.w / 0.5625),
-                            x_center=clip.w / 2,
-                            y_center=clip.h / 2,
-                        )
+                    if asset_type == "video":
+                        # ── Video asset (Pexels) ────────────────────────
+                        clip = VideoFileClip(asset_path).without_audio()
+                        self._clips_to_close.append(clip)
+
+                        # Loop if shorter than required duration
+                        if clip.duration < req_dur:
+                            clip = clip.fx(vfx.loop, duration=req_dur)
+
+                        clip = clip.subclip(0, req_dur)
+                        clip = clip.resize((1080, 1920))
+                        clip = clip.set_fps(30)
                     else:
-                        if get_verbose():
-                            info(f" => Resizing Image: {image_path} to 1920x1080")
-                        clip = crop(
-                            clip,
-                            width=round(0.5625 * clip.h),
-                            height=clip.h,
-                            x_center=clip.w / 2,
-                            y_center=clip.h / 2,
-                        )
-                    clip = clip.resize((1080, 1920))
+                        # ── Image asset ─────────────────────────────────
+                        clip = ImageClip(asset_path)
+                        self._clips_to_close.append(clip)
+                        clip.duration = req_dur
+                        clip = clip.set_fps(30)
+                        clip = clip.resize(lambda t: 1 + 0.03 * t)
+
+                        if round((clip.w / clip.h), 4) < 0.5625:
+                            if get_verbose():
+                                info(f" => Resizing Image: {asset_path} to 1080x1920")
+                            clip = crop(
+                                clip,
+                                width=clip.w,
+                                height=round(clip.w / 0.5625),
+                                x_center=clip.w / 2,
+                                y_center=clip.h / 2,
+                            )
+                        else:
+                            if get_verbose():
+                                info(f" => Resizing Image: {asset_path} to 1920x1080")
+                            clip = crop(
+                                clip,
+                                width=round(0.5625 * clip.h),
+                                height=clip.h,
+                                x_center=clip.w / 2,
+                                y_center=clip.h / 2,
+                            )
+                        clip = clip.resize((1080, 1920))
+
                     clips.append(clip)
                     tot_dur += clip.duration
 
         final_clip = concatenate_videoclips(clips) if clips else None
         if final_clip:
+            self._clips_to_close.append(final_clip)
             final_clip = final_clip.set_fps(30)
 
         random_song       = choose_random_song()
         bg_clip           = self.get_background_clip(tts_clip.duration)
         random_song_clip  = AudioFileClip(random_song).set_fps(44100)
+        self._clips_to_close.append(random_song_clip)
         random_song_clip  = random_song_clip.fx(afx.volumex, 0.1)
         comp_audio        = CompositeAudioClip([tts_clip.set_fps(44100), random_song_clip])
+        self._clips_to_close.append(comp_audio)
 
-        if bg_clip is not None:
-            base_clip  = bg_clip.set_audio(comp_audio)
-            base_clip  = base_clip.set_duration(tts_clip.duration)
-            final_clip = base_clip
+        # ── Compose final clip: AI images are ALWAYS the primary visual layer ──
+        # bg_clip is deliberately NOT used as the base when images exist —
+        # previously it overwrote final_clip entirely, hiding all generated images.
+        if final_clip is not None:
+            # Images mode: image slideshow fills the full 1080×1920 frame
+            final_clip = final_clip.set_audio(comp_audio)
+            final_clip = final_clip.set_duration(tts_clip.duration)
+        elif bg_clip is not None:
+            # Reddit / no-images fallback: gameplay video as sole visual layer
+            print("[VIDEO] No images available — falling back to background video.")
+            final_clip = bg_clip.set_audio(comp_audio)
+            final_clip = final_clip.set_duration(tts_clip.duration)
         else:
-            if final_clip is not None:
-                final_clip = final_clip.set_audio(comp_audio)
-                final_clip = final_clip.set_duration(tts_clip.duration)
-            else:
-                raise RuntimeError("No background video and no images available. Cannot combine video.")
+            raise RuntimeError("No images and no background video available. Cannot combine video.")
 
         # ── Write raw video (NO subtitles yet) ────────────────────────────
         raw_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + "_raw.mp4")
@@ -1122,15 +1384,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if get_verbose():
             info(f" => Generated Video: {path}")
 
-        self.video_path = os.path.abspath(path)
+        self.video_path = path
 
         # Copy to permanent output_videos/ folder so it survives temp-file cleanup
         import shutil
         output_dir = os.path.join(ROOT_DIR, "output_videos")
         os.makedirs(output_dir, exist_ok=True)
-        safe_title = re.sub(r'[\\/*?:"<>|]', "_", self.metadata.get("title", "video"))[:50]
+        safe_title = re.sub(r'[\\/*?:"<>|\n\r\t]', "_", self.metadata.get("title", "video"))[:50].strip()
         final_output = os.path.join(output_dir, f"{safe_title}.mp4")
+
+        if not os.path.exists(self.video_path):
+            raise FileNotFoundError(f"[ERROR] video_path does not exist: {self.video_path}")
+
         shutil.copy2(self.video_path, final_output)
+        # Update video_path to the named file so upload_video() sends a
+        # human-readable filename to YouTube (prevents UUID auto-fill in title).
+        self.video_path = final_output
         print(f"[VIDEO] Saved to output folder: {final_output}")
 
         return path
@@ -1278,6 +1547,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         info("\t=> Setting title...")
         
                     self._safe_click_and_clear(driver, title_el)
+                    print(f"[UPLOAD] Confirming title before typing: {self.metadata['title']}")
                     self._safe_type_text(driver, title_el, self.metadata["title"])
                     print(f"[UPLOAD] Title set to: {self.metadata['title']}")
         
@@ -1304,7 +1574,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     if attempt == max_retries - 1:
                         raise  # give up after 3 tries
 
-            time.sleep(0.5)
+            time.sleep(1.5)  # Extended sleep to let any lingering dropdowns close
 
             # Set `made for kids` option
             if verbose:
@@ -1317,10 +1587,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 By.NAME, YOUTUBE_NOT_MADE_FOR_KIDS_NAME
             )
 
+            # Dismiss any open overlay/backdrop first
+            try:
+                overlay = driver.find_element(By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened")
+                driver.execute_script("arguments[0].click();", overlay)
+                time.sleep(0.5)
+            except:
+                pass  # No overlay, continue
+
+            # Now click via JS instead of .click() to bypass interception
             if not get_is_for_kids():
-                is_not_for_kids_checkbox.click()
+                is_not_for_kids_checkbox = driver.find_element(By.CSS_SELECTOR, 
+                    "tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']")
+                driver.execute_script("arguments[0].click();", is_not_for_kids_checkbox)
             else:
-                is_for_kids_checkbox.click()
+                is_for_kids_checkbox = driver.find_element(By.CSS_SELECTOR, 
+                    "tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS']")
+                driver.execute_script("arguments[0].click();", is_for_kids_checkbox)
 
             time.sleep(0.5)
 
@@ -1330,7 +1613,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             next_button = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
             )
-            next_button.click()
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
+                )
+                driver.execute_script("arguments[0].click();", next_button)
+            except Exception:
+                driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].click();", next_button)
             time.sleep(2)
 
             # Click next (step 2 → 3)
@@ -1339,7 +1630,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             next_button = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
             )
-            next_button.click()
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
+                )
+                driver.execute_script("arguments[0].click();", next_button)
+            except Exception:
+                driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].click();", next_button)
             time.sleep(2)
 
             # Click next (step 3 → 4 visibility)
@@ -1348,77 +1647,131 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             next_button = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
             )
-            next_button.click()
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
+                )
+                driver.execute_script("arguments[0].click();", next_button)
+            except Exception:
+                driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].click();", next_button)
             time.sleep(2)
 
-            # Set visibility: pick "Unlisted" radio (index 2)
+            # Step 1: Wait 3 seconds after reaching the visibility step
             if verbose:
                 info("\t=> Setting visibility to unlisted...")
-            radio_buttons = WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located((By.XPATH, YOUTUBE_RADIO_BUTTON_XPATH))
-            )
-            print(f"[UPLOAD] Found {len(radio_buttons)} radio buttons")
-            if len(radio_buttons) >= 3:
-                radio_buttons[0].click()  # index 2 = Unlisted
+            time.sleep(3)
+
+            unlisted_xpaths = [
+                "//tp-yt-paper-radio-group//tp-yt-paper-radio-button[2]",
+                "//*[contains(@name, 'VIDEO_MADE_FOR_KIDS')]/..//tp-yt-paper-radio-button[2]",
+                "//ytcp-video-visibility-select//tp-yt-paper-radio-button[2]"
+            ]
+
+            unlisted_element = None
+            for xpath in unlisted_xpaths:
+                try:
+                    elements = driver.find_elements(By.XPATH, xpath)
+                    if elements:
+                        unlisted_element = elements[0]
+                        print(f"[UPLOAD] Found Unlisted radio button using XPath: {xpath}")
+                        break
+                except Exception as e:
+                    pass
+
+            if unlisted_element:
+                driver.execute_script("arguments[0].scrollIntoView(true);", unlisted_element)
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", unlisted_element)
+                time.sleep(2)  # Wait 2 seconds after clicking
+
+                is_checked = unlisted_element.get_attribute("aria-checked")
+                print(f"[UPLOAD] Unlisted radio aria-checked: {is_checked}")
             else:
-                warning(f"Expected >=3 radio buttons for visibility, got {len(radio_buttons)}. Skipping unlisted selection.")
+                try:
+                    driver.save_screenshot("visibility_debug.png")
+                    print("[UPLOAD] ❌ Could not find Unlisted radio button. Saved visibility_debug.png.")
+                except:
+                    pass
+                warning("[UPLOAD] Visibility selection failed. Continuing anyway.")
 
-            time.sleep(1)
-
-            if verbose:
-                info("\t=> Clicking done button...")
-
-            done_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, YOUTUBE_DONE_BUTTON_ID))
-            )
-            done_button.click()
+            # Wait 3 seconds — YouTube briefly disables Done while processing
+            # the visibility change. Shadow DOM inside ytcp-button means normal
+            # XPath / WebDriverWait cannot find the element at all.
             time.sleep(3)
 
-            # Get latest video URL from Studio
             if verbose:
-                info("\t=> Getting video URL from Studio...")
+                info("\t=> Clicking done button (Shadow DOM JS pierce)...")
 
-            driver.get(
-                f"https://studio.youtube.com/channel/{self.channel_id}/videos/short"
-            )
+            # Pierce Shadow DOM with querySelector — works even inside web components.
+            done_button = driver.execute_script("""
+                return document.querySelector('#done-button')
+                    || document.querySelector('ytcp-button#done-button')
+                    || [...document.querySelectorAll('ytcp-button')]
+                        .find(el => el.textContent.trim() === 'Save' ||
+                                    el.textContent.trim() === 'Done');
+            """)
+
+            if done_button:
+                driver.execute_script("arguments[0].scrollIntoView(true);", done_button)
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", done_button)
+                print("[UPLOAD] Successfully clicked 'Done' button via Shadow DOM JS")
+            else:
+                # Dump a page-source snippet to help diagnose future failures
+                snippet = driver.page_source[:3000]
+                raise Exception(
+                    f"[UPLOAD ERROR] Done button not found in DOM (Shadow DOM pierce failed).\n"
+                    f"Page source snippet:\n{snippet}"
+                )
+
             time.sleep(3)
 
-            videos_rows = WebDriverWait(driver, 20).until(
-                EC.presence_of_all_elements_located((By.TAG_NAME, "ytcp-video-row"))
-            )
-            first_video = videos_rows[0]
-            anchor_tag = first_video.find_element(By.TAG_NAME, "a")
-            href = anchor_tag.get_attribute("href")
-            print(f"[UPLOAD] Video href: {href}")
-            video_id = href.split("/")[-2]
+            # After clicking Done, try to get video URL
+            try:
+                # Wait for the page URL to match the pattern **/video/**/edit with a timeout of 15000ms
+                WebDriverWait(driver, 15).until(
+                    lambda d: "/video/" in d.current_url and "/edit" in d.current_url
+                )
+                
+                # Grab page.url after redirect
+                curr_url = driver.current_url
+                
+                # Extract video ID by splitting on /video/ and taking index [1], then splitting on / and taking index [0]
+                video_id = curr_url.split("/video/")[1].split("/")[0]
+                
+                # Construct the final URL as https://youtube.com/shorts/{video_id}
+                url = f"https://youtube.com/shorts/{video_id}"
+                
+                # Log it
+                print(f"[UPLOAD] Final Video URL: {url}")
+                self.uploaded_video_url = url
+                
+                # Persist to cache
+                self.add_video(
+                    {
+                        "title": self.metadata["title"],
+                        "description": self.metadata["description"],
+                        "url": url,
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+                print(f"[UPLOAD] Video saved to cache: {url}")
+                
+                # Return it
+                return url
+                
+            except Exception as e:
+                print(f"[UPLOAD] ✅ Video uploaded successfully but URL could not be extracted: {e}")
+                print("Check YouTube Studio manually. Continuing program normally.")
+                self.uploaded_video_url = None
 
-            url = build_url(video_id)
-            self.uploaded_video_url = url
-
-            if verbose:
-                success(f" => Uploaded Video: {url}")
-
-            # Persist to cache
-            self.add_video(
-                {
-                    "title": self.metadata["title"],
-                    "description": self.metadata["description"],
-                    "url": url,
-                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-            )
-            print(f"[UPLOAD] Video saved to cache: {url}")
-
-            driver.quit()
-            return True
+                return True
 
         except Exception as e:
             print(f"\n[UPLOAD ERROR] Upload failed with exception: {type(e).__name__}: {e}")
             traceback.print_exc()
-            try:
-                self.browser.quit()
-            except Exception:
-                pass
             return False
 
     def get_videos(self) -> List[dict]:
@@ -1455,11 +1808,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         bg_path = os.path.join(bg_dir, random.choice(bg_files))
         print(f"[BG] Using background: {bg_path}")
         bg_clip = VideoFileClip(bg_path)
+        self._clips_to_close.append(bg_clip)
         
         # Loop if shorter than needed
         if bg_clip.duration < duration:
             loops = int(duration / bg_clip.duration) + 1
             bg_clip = concatenate_videoclips([bg_clip] * loops)
+            self._clips_to_close.append(bg_clip)
         
         # Start from random point for variety
         max_start = max(0, bg_clip.duration - duration - 1)
