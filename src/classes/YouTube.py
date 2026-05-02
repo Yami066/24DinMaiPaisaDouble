@@ -441,12 +441,18 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
         Returns:
             metadata (dict): The generated metadata.
         """
-        title = self.generate_response(
+        title_raw = self.generate_response(
             f"Generate a catchy YouTube title for a video about {self.subject}. "
             f"The title MUST be highly similar to this format: '5 Facts That Sound Fake But Are 100% True 🤯'. "
             f"Do not include quotes or hashtags in the title itself. Keep it under 100 characters. "
             f"Return ONLY the title."
-        ).strip().replace('"', '').replace("'", "")[:99]
+        )
+        title = ""
+        for line in title_raw.splitlines():
+            if line.strip():
+                title = line.strip()
+                break
+        title = title.replace('"', '').replace("'", "")[:99]
 
         description = self.generate_response(
             f"Generate a very short 1-2 sentence YouTube description asking a question about this script: {self.script}. "
@@ -1345,6 +1351,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 except OSError:
                     pass
 
+        # ── Resource Cleanup: Explicitly close clips to release file handles ──
+        for clip in self._clips_to_close:
+            try:
+                # Close specifically VideoFileClips to release .mp4 file locks on Windows
+                if isinstance(clip, VideoFileClip):
+                    clip.close()
+            except Exception:
+                pass
+
         success(f'Wrote Video to "{combined_image_path}"')
         return combined_image_path
 
@@ -1576,36 +1591,63 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             time.sleep(1.5)  # Extended sleep to let any lingering dropdowns close
 
-            # Set `made for kids` option
+            # ── Set `made for kids` option ─────────────────────────────────
             if verbose:
                 info("\t=> Setting `made for kids` option...")
 
-            is_for_kids_checkbox = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.NAME, YOUTUBE_MADE_FOR_KIDS_NAME))
-            )
-            is_not_for_kids_checkbox = driver.find_element(
-                By.NAME, YOUTUBE_NOT_MADE_FOR_KIDS_NAME
+            # Wait for the audience radio buttons to be present
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.NAME, "VIDEO_MADE_FOR_KIDS_NOT_MFK"))
             )
 
-            # Dismiss any open overlay/backdrop first
-            try:
-                overlay = driver.find_element(By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened")
-                driver.execute_script("arguments[0].click();", overlay)
-                time.sleep(0.5)
-            except:
-                pass  # No overlay, continue
+            is_kids = get_is_for_kids()
+            target_name = "VIDEO_MADE_FOR_KIDS" if is_kids else "VIDEO_MADE_FOR_KIDS_NOT_MFK"
+            
+            selectors = [
+                f"tp-yt-paper-radio-button[name='{target_name}']",
+                f"//*[@name='{target_name}']"
+            ]
 
-            # Now click via JS instead of .click() to bypass interception
-            if not get_is_for_kids():
-                is_not_for_kids_checkbox = driver.find_element(By.CSS_SELECTOR, 
-                    "tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']")
-                driver.execute_script("arguments[0].click();", is_not_for_kids_checkbox)
-            else:
-                is_for_kids_checkbox = driver.find_element(By.CSS_SELECTOR, 
-                    "tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS']")
-                driver.execute_script("arguments[0].click();", is_for_kids_checkbox)
+            clicked_successfully = False
+            for selector in selectors:
+                try:
+                    if selector.startswith("//"):
+                        element = driver.find_element(By.XPATH, selector)
+                    else:
+                        element = driver.find_element(By.CSS_SELECTOR, selector)
+                    
+                    # Scroll to center to avoid sticky headers blocking the click
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                    time.sleep(1)
 
-            time.sleep(0.5)
+                    # Try primary JS click
+                    driver.execute_script("arguments[0].click();", element)
+                    time.sleep(1)
+
+                    # Verify state
+                    if element.get_attribute("aria-checked") == "true":
+                        clicked_successfully = True
+                        print(f"[UPLOAD] Verified 'Made for Kids' == {is_kids} ✅")
+                        break
+                    
+                    # Fallback: Pierce inner radio container
+                    inner_radio = element.find_element(By.ID, "radioContainer")
+                    driver.execute_script("arguments[0].click();", inner_radio)
+                    time.sleep(1)
+
+                    if element.get_attribute("aria-checked") == "true":
+                        clicked_successfully = True
+                        print(f"[UPLOAD] Verified 'Made for Kids' == {is_kids} (via inner container) ✅")
+                        break
+
+                except Exception as e:
+                    print(f"[UPLOAD] Failed to click audience selector {selector}: {e}")
+                    continue
+
+            if not clicked_successfully:
+               warning("[UPLOAD] Could not verify 'Made for Kids' selection. Continuing anyway...")
+            
+            time.sleep(1) # Let YouTube backend register the change
 
             # Click next (step 1 → 2)
             if verbose:
