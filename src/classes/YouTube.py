@@ -1772,27 +1772,44 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if verbose:
                 info("\t=> Clicking done button (Shadow DOM JS pierce)...")
 
-            # Pierce Shadow DOM with querySelector — works even inside web components.
-            done_button = driver.execute_script("""
-                return document.querySelector('#done-button')
-                    || document.querySelector('ytcp-button#done-button')
-                    || [...document.querySelectorAll('ytcp-button')]
-                        .find(el => el.textContent.trim() === 'Save' ||
-                                    el.textContent.trim() === 'Done');
-            """)
-
-            if done_button:
-                driver.execute_script("arguments[0].scrollIntoView(true);", done_button)
-                time.sleep(0.3)
-                driver.execute_script("arguments[0].click();", done_button)
-                print("[UPLOAD] Successfully clicked 'Done' button via Shadow DOM JS")
-            else:
-                # Dump a page-source snippet to help diagnose future failures
-                snippet = driver.page_source[:3000]
-                raise Exception(
-                    f"[UPLOAD ERROR] Done button not found in DOM (Shadow DOM pierce failed).\n"
-                    f"Page source snippet:\n{snippet}"
+            try:
+                # 2. Wait up to 60 seconds for YouTube to remove the 'disabled' state
+                WebDriverWait(driver, 60).until(
+                    lambda d: d.execute_script("""
+                        var wrapper = document.querySelector('#done-button');
+                        if (!wrapper) return false;
+                        
+                        // Check both the wrapper and the inner native button for disabled states
+                        var innerBtn = wrapper.querySelector('button');
+                        var target = innerBtn ? innerBtn : wrapper;
+                        
+                        var isDisabled = target.hasAttribute('disabled') && target.getAttribute('disabled') !== 'false' 
+                                         || target.getAttribute('aria-disabled') === 'true';
+                        return !isDisabled;
+                    """)
                 )
+                print("[UPLOAD] Publish/Save button is now OFFICIALLY ENABLED by YouTube! ✅")
+
+                # 3. Safely click the INNER native button
+                driver.execute_script("""
+                    var wrapper = document.querySelector('#done-button');
+                    if (wrapper) {
+                        wrapper.scrollIntoView({block: 'center'});
+                        var innerBtn = wrapper.querySelector('button');
+                        
+                        if (innerBtn) {
+                            innerBtn.click(); // Click the actual native button
+                        } else {
+                            wrapper.click();  // Fallback
+                        }
+                    }
+                """)
+                print("[UPLOAD] Successfully clicked the inner Save/Publish button.")
+                
+            except Exception as e:
+                print(f"[UPLOAD ERROR] The Save button never became enabled (Timeout): {type(e).__name__}")
+                driver.save_screenshot("failed_save_state.png")
+                print("[UPLOAD] Saved 'failed_save_state.png'. Check this image to see what required field is missing!")
 
             time.sleep(3)
 
