@@ -1656,63 +1656,48 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             time.sleep(1.5)  # Extended sleep to let any lingering dropdowns close
 
-            # ── Set `made for kids` option ─────────────────────────────────
+            # ── Set 'Not Made for Kids' ────────────────────────────
             if verbose:
-                info("\t=> Setting `made for kids` option...")
-
-            # Wait for the audience radio buttons to be present
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.NAME, "VIDEO_MADE_FOR_KIDS_NOT_MFK"))
-            )
-
-            is_kids = False
-            target_name = "VIDEO_MADE_FOR_KIDS" if is_kids else "VIDEO_MADE_FOR_KIDS_NOT_MFK"
-            
-            selectors = [
-                f"tp-yt-paper-radio-button[name='{target_name}']",
-                f"//*[@name='{target_name}']"
-            ]
-
-            clicked_successfully = False
-            for selector in selectors:
-                try:
-                    if selector.startswith("//"):
-                        element = driver.find_element(By.XPATH, selector)
-                    else:
-                        element = driver.find_element(By.CSS_SELECTOR, selector)
-                    
-                    # Scroll to center to avoid sticky headers blocking the click
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                info("\t=> Setting 'Not Made for Kids'...")
+        
+            try:
+                # Wait for radio buttons to appear
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']")
+                    )
+                )
+                time.sleep(1)
+        
+                not_for_kids = driver.find_element(
+                    By.CSS_SELECTOR, 
+                    "tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']"
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", not_for_kids)
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].click();", not_for_kids)
+                time.sleep(1)
+        
+                # Verify it worked
+                checked = not_for_kids.get_attribute("aria-checked")
+                if checked == "true":
+                    print("[UPLOAD] ✅ 'Not Made for Kids' selected successfully.")
+                else:
+                    # Try clicking the inner paper-radio element
+                    driver.execute_script("""
+                        var el = document.querySelector("tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']");
+                        if (el) {
+                            var inner = el.shadowRoot ? el.shadowRoot.querySelector('#radioContainer') : el.querySelector('#radioContainer');
+                            if (inner) inner.click();
+                            else el.click();
+                        }
+                    """)
                     time.sleep(1)
-
-                    # Try primary JS click
-                    driver.execute_script("arguments[0].click();", element)
-                    time.sleep(1)
-
-                    # Verify state
-                    if element.get_attribute("aria-checked") == "true":
-                        clicked_successfully = True
-                        print(f"[UPLOAD] Verified 'Made for Kids' == {is_kids} ✅")
-                        break
-                    
-                    # Fallback: Pierce inner radio container
-                    inner_radio = element.find_element(By.ID, "radioContainer")
-                    driver.execute_script("arguments[0].click();", inner_radio)
-                    time.sleep(1)
-
-                    if element.get_attribute("aria-checked") == "true":
-                        clicked_successfully = True
-                        print(f"[UPLOAD] Verified 'Made for Kids' == {is_kids} (via inner container) ✅")
-                        break
-
-                except Exception as e:
-                    print(f"[UPLOAD] Failed to click audience selector {selector}: {e}")
-                    continue
-
-            if not clicked_successfully:
-               warning("[UPLOAD] Could not verify 'Made for Kids' selection. Continuing anyway...")
-            
-            time.sleep(1) # Let YouTube backend register the change
+                    print("[UPLOAD] ⚠️ Attempted shadow DOM click for 'Not Made for Kids'.")
+        
+            except Exception as e:
+                print(f"[UPLOAD] ❌ 'Not Made for Kids' selection failed: {e}")
+                print("[UPLOAD] Continuing anyway — check YouTube Studio manually.")
 
             # Click next (step 1 → 2)
             if verbose:
@@ -1729,43 +1714,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 info("\t=> Clicking next (step 3)...")
             self._click_next_step(driver)
 
-            # Step 1: Wait 3 seconds after reaching the visibility step
+            # ── Set visibility to Public ───────────────────────────
             if verbose:
-                info("\t=> Setting visibility to unlisted...")
+                info("\t=> Setting visibility to Public...")
             time.sleep(3)
-
-            unlisted_xpaths = [
-                "//tp-yt-paper-radio-group//tp-yt-paper-radio-button[1]",
-                "//*[contains(@name, 'VIDEO_MADE_FOR_KIDS')]/..//tp-yt-paper-radio-button[1]",
-                "//ytcp-video-visibility-select//tp-yt-paper-radio-button[1]"
-            ]
-
-            unlisted_element = None
-            for xpath in unlisted_xpaths:
-                try:
-                    elements = driver.find_elements(By.XPATH, xpath)
-                    if elements:
-                        unlisted_element = elements[0]
-                        print(f"[UPLOAD] Found Unlisted radio button using XPath: {xpath}")
-                        break
-                except Exception as e:
-                    pass
-
-            if unlisted_element:
-                driver.execute_script("arguments[0].scrollIntoView(true);", unlisted_element)
-                time.sleep(0.3)
-                driver.execute_script("arguments[0].click();", unlisted_element)
-                time.sleep(2)  # Wait 2 seconds after clicking
-
-                is_checked = unlisted_element.get_attribute("aria-checked")
-                print(f"[UPLOAD] Unlisted radio aria-checked: {is_checked}")
-            else:
-                try:
-                    driver.save_screenshot("visibility_debug.png")
-                    print("[UPLOAD] ❌ Could not find Unlisted radio button. Saved visibility_debug.png.")
-                except:
-                    pass
-                warning("[UPLOAD] Visibility selection failed. Continuing anyway.")
+        
+            try:
+                # Wait for visibility options to load
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "tp-yt-paper-radio-button[name='PUBLIC']")
+                    )
+                )
+                public_btn = driver.find_element(
+                    By.CSS_SELECTOR, "tp-yt-paper-radio-button[name='PUBLIC']"
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", public_btn)
+                time.sleep(0.5)
+                driver.execute_script("arguments[0].click();", public_btn)
+                time.sleep(2)
+        
+                checked = public_btn.get_attribute("aria-checked")
+                if checked == "true":
+                    print("[UPLOAD] ✅ Visibility set to Public.")
+                else:
+                    print("[UPLOAD] ⚠️ Public click may not have registered. Trying fallback...")
+                    driver.execute_script("""
+                        var el = document.querySelector("tp-yt-paper-radio-button[name='PUBLIC']");
+                        if (el) el.click();
+                    """)
+                    time.sleep(1)
+        
+            except Exception as e:
+                print(f"[UPLOAD] ❌ Visibility selection failed: {e}")
+                driver.save_screenshot("visibility_debug.png")
+                print("[UPLOAD] Saved visibility_debug.png for debugging.")
 
             # Wait 3 seconds — YouTube briefly disables Done while processing
             # the visibility change. Shadow DOM inside ytcp-button means normal
