@@ -44,7 +44,39 @@ def get_active_model() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Gemini — primary text generator
+# Groq — primary fast text generator
+# ---------------------------------------------------------------------------
+
+def generate_text_groq(prompt: str, system_prompt: str | None = None) -> str:
+    import requests, json, os
+    from config import ROOT_DIR
+    try:
+        with open(os.path.join(ROOT_DIR, "config.json"), "r") as f:
+            cfg = json.load(f)
+        api_key = cfg.get("groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
+    except Exception:
+        api_key = os.environ.get("GROQ_API_KEY", "")
+
+    if not api_key:
+        print("[GROQ] No groq_api_key found. Skipping.")
+        return ""
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 1000},
+        timeout=30
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+# ---------------------------------------------------------------------------
+# Gemini — fallback text generator
 # ---------------------------------------------------------------------------
 
 # Model priority list — tried in order, skip to next on quota/error

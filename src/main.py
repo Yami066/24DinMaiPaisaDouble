@@ -137,103 +137,106 @@ def main():
                 error("Invalid account selected. Please try again.", "red")
                 main()
             else:
-                youtube = YouTube(
+                with YouTube(
                     selected_account["id"],
                     selected_account["nickname"],
                     selected_account["firefox_profile"],
                     selected_account["niche"],
                     selected_account["language"]
-                )
+                ) as youtube:
 
-                while True:
-                    rem_temp_files()
-                    info("\n============ OPTIONS ============", False)
-
-                    for idx, youtube_option in enumerate(YOUTUBE_OPTIONS):
-                        print(colored(f" {idx + 1}. {youtube_option}", "cyan"))
-
-                    info("=================================\n", False)
-
-                    # Get user input
-                    try:
-                        user_input = int(question("Select an option: "))
-                    except ValueError:
-                        warning("Please enter a number.")
-                        continue
-
-                    if user_input == 1:
-                        # Story source selection menu
-                        print(colored("\n============ STORY SOURCE ============", "cyan"))
-                        print(colored(" 1. Generate with Ollama (AI Generated)", "cyan"))
-                        print(colored(" 2. Use Real Reddit Story", "cyan"))
-                        print(colored(" =====================================\n", "cyan"))
-
-                        story_choice = question("Select story source: ").strip()
-
-                        if story_choice == "1":
-                            youtube.set_story_mode("ollama")
-                            success("Using Ollama AI generation")
-                        elif story_choice == "2":
-                            youtube.set_story_mode("reddit")
-                            success("Using real Reddit story")
-                        else:
-                            warning("Invalid choice, defaulting to Ollama")
-                            youtube.set_story_mode("ollama")
-
-                        youtube.generate_video()
-
-                        upload_to_yt = question("Do you want to upload this video to YouTube? (Yes/No): ")
-                        if upload_to_yt.lower() == "yes":
-                            youtube.upload_video()
-                    elif user_input == 2:
-                        videos = youtube.get_videos()
-
-                        if len(videos) > 0:
-                            videos_table = PrettyTable()
-                            videos_table.field_names = ["ID", "Date", "Title"]
-
-                            for video in videos:
-                                videos_table.add_row([
-                                    videos.index(video) + 1,
-                                    colored(video["date"], "blue"),
-                                    colored(video["title"][:60] + "...", "green")
-                                ])
-
-                            print(videos_table)
-                        else:
-                            warning(" No videos found.")
-                    elif user_input == 3:
-                        info("How often do you want to upload?")
-
+                    while True:
+                        rem_temp_files()
                         info("\n============ OPTIONS ============", False)
-                        for idx, cron_option in enumerate(YOUTUBE_CRON_OPTIONS):
-                            print(colored(f" {idx + 1}. {cron_option}", "cyan"))
+
+                        for idx, youtube_option in enumerate(YOUTUBE_OPTIONS):
+                            print(colored(f" {idx + 1}. {youtube_option}", "cyan"))
 
                         info("=================================\n", False)
 
-                        user_input = int(question("Select an Option: "))
-
-                        cron_script_path = os.path.join(ROOT_DIR, "src", "cron.py")
-                        command = ["python", cron_script_path, "youtube", selected_account['id'], get_active_model()]
-
-                        def job():
-                            subprocess.run(command)
+                        # Get user input
+                        try:
+                            user_input = int(question("Select an option: "))
+                        except ValueError:
+                            warning("Please enter a number.")
+                            continue
 
                         if user_input == 1:
-                            # Upload Once
-                            schedule.every(1).day.do(job)
-                            success("Set up CRON Job.")
+                            # Story source selection menu
+                            print(colored("\n============ STORY SOURCE ============", "cyan"))
+                            print(colored(" 1. Generate with Ollama (AI Generated)", "cyan"))
+                            print(colored(" 2. Use Real Reddit Story", "cyan"))
+                            print(colored(" =====================================\n", "cyan"))
+
+                            story_choice = question("Select story source: ").strip()
+
+                            if story_choice == "1":
+                                youtube.set_story_mode("ollama")
+                                success("Using Ollama AI generation")
+                            elif story_choice == "2":
+                                youtube.set_story_mode("reddit")
+                                success("Using real Reddit story")
+                            else:
+                                warning("Invalid choice, defaulting to Ollama")
+                                youtube.set_story_mode("ollama")
+
+                            youtube.generate_video()
+
+                            upload_to_yt = question("Do you want to upload this video to YouTube? (Yes/No): ")
+                            if upload_to_yt.lower() == "yes":
+                                youtube.upload_video()
+
                         elif user_input == 2:
-                            # Upload Twice a day
-                            schedule.every().day.at("10:00").do(job)
-                            schedule.every().day.at("16:00").do(job)
-                            success("Set up CRON Job.")
-                        else:
+                            videos = youtube.get_videos()
+
+                            if len(videos) > 0:
+                                videos_table = PrettyTable()
+                                videos_table.field_names = ["ID", "Date", "Title"]
+
+                                for video in videos:
+                                    videos_table.add_row([
+                                        videos.index(video) + 1,
+                                        colored(video["date"], "blue"),
+                                        colored(video["title"][:60] + "...", "green")
+                                    ])
+
+                                print(videos_table)
+                            else:
+                                warning(" No videos found.")
+
+                        elif user_input == 3:
+                            info("How often do you want to upload?")
+
+                            info("\n============ OPTIONS ============", False)
+                            for idx, cron_option in enumerate(YOUTUBE_CRON_OPTIONS):
+                                print(colored(f" {idx + 1}. {cron_option}", "cyan"))
+
+                            info("=================================\n", False)
+
+                            user_input = int(question("Select an Option: "))
+
+                            cron_script_path = os.path.join(ROOT_DIR, "src", "cron.py")
+                            command = ["python", cron_script_path, "youtube", selected_account['id'], get_active_model()]
+
+                            def job():
+                                subprocess.run(command)
+
+                            if user_input == 1:
+                                # Upload Once
+                                schedule.every(1).day.do(job)
+                                success("Set up CRON Job.")
+                            elif user_input == 2:
+                                # Upload Twice a day
+                                schedule.every().day.at("10:00").do(job)
+                                schedule.every().day.at("16:00").do(job)
+                                success("Set up CRON Job.")
+                            else:
+                                warning("Invalid choice.")
+
+                        elif user_input == 4:
+                            if get_verbose():
+                                info(" => Climbing Options Ladder...", False)
                             break
-                    elif user_input == 4:
-                        if get_verbose():
-                            info(" => Climbing Options Ladder...", False)
-                        break
     elif user_input == 2:
         info("Starting Twitter Bot...")
 

@@ -6,10 +6,27 @@ import platform
 
 from status import *
 from config import *
+import time
+
 
 DEFAULT_SONG_ARCHIVE_URLS = []
 
-
+def rem_temp_files():
+    mp_dir = os.path.join(ROOT_DIR, ".mp")
+    if not os.path.exists(mp_dir):
+        return
+    for file in os.listdir(mp_dir):
+        if not file.endswith(".json"):
+            file_path = os.path.join(mp_dir, file)
+            for attempt in range(5):
+                try:
+                    os.remove(file_path)
+                    break
+                except PermissionError:
+                    time.sleep(1)
+                except Exception:
+                    break       
+                    
 def close_running_selenium_instances() -> None:
     """
     Closes any running Selenium instances.
@@ -22,7 +39,8 @@ def close_running_selenium_instances() -> None:
 
         # Kill all running Firefox instances
         if platform.system() == "Windows":
-            os.system("taskkill /f /im firefox.exe")
+            os.system("taskkill /f /im firefox.exe /T >nul 2>&1")
+            os.system("taskkill /f /im geckodriver.exe /T >nul 2>&1")
         else:
             os.system("pkill firefox")
 
@@ -45,21 +63,7 @@ def build_url(youtube_video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={youtube_video_id}"
 
 
-def rem_temp_files() -> None:
-    """
-    Removes temporary files in the `.mp` directory.
 
-    Returns:
-        None
-    """
-    # Path to the `.mp` directory
-    mp_dir = os.path.join(ROOT_DIR, ".mp")
-
-    files = os.listdir(mp_dir)
-
-    for file in files:
-        if not file.endswith(".json"):
-            os.remove(os.path.join(mp_dir, file))
 
 
 def fetch_songs() -> None:

@@ -94,3 +94,7 @@ AGENTS.md
 CODE_OF_CONDUCT.md
 CONTRIBUTING.md
 technical_breakdown.md
+src/classes/AFM.py
+src/classes/Outreach.py
+src/classes/Tts.py
+src/classes/Twitter.py

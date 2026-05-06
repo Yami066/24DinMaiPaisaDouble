@@ -7,11 +7,15 @@ import traceback
 import requests
 import assemblyai as aai
 import random
-from utils import *
-from cache import *
+from utils import choose_random_song
+from cache import get_youtube_cache_path
 from llm_provider import generate_text
-from config import *
-from status import *
+from config import (
+    ROOT_DIR, get_imagemagick_path, get_headless, get_verbose,
+    get_stt_provider, get_assemblyai_api_key, get_whisper_model,
+    get_threads, get_is_for_kids
+)
+from status import error, warning, info, success
 from uuid import uuid4
 from constants import *
 from typing import List
@@ -88,6 +92,7 @@ class YouTube:
         self.tts_path: str = ""
         self.story_mode: str = "ollama"
         self._clips_to_close: list = []
+        self._files_to_delete: list = []
 
         # Initialize the Firefox profile
         self.options: Options = Options()
@@ -130,6 +135,13 @@ class YouTube:
             try:
                 clip.close()
             except Exception:
+                pass
+
+        for file_path in getattr(self, '_files_to_delete', []):
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except OSError:
                 pass
 
     def set_story_mode(self, mode: str) -> None:
@@ -228,7 +240,16 @@ class YouTube:
         Returns:
             response (str): The generated AI Response.
         """
-        return generate_text(prompt, model_name=model_name, system_prompt=system_prompt)
+        try:
+            from llm_provider import generate_text_groq
+            completion = generate_text_groq(prompt, system_prompt=system_prompt)
+            if completion:
+                return completion
+        except Exception as e:
+            print(f"[GROQ] Error in generate_response: {e}")
+        
+        from llm_provider import generate_text_gemini
+        return generate_text_gemini(prompt, system_prompt=system_prompt) or ""
 
     def generate_topic(self) -> str:
         """
@@ -298,37 +319,39 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
                     "following your rules exactly.\n\nRAW STORY:\n" + reddit_story
                 )
 
-                # ── STEP 2: Try Gemini FIRST ──────────────────────────────
-                print("[SCRIPT] Trying Gemini 2.5 Flash first...")
+                # ── STEP 2: Try Groq FIRST ────────────────────────────────
+                print("[SCRIPT] Trying Groq (llama-3.3-70b-versatile) first...")
                 try:
-                    from llm_provider import generate_text_gemini
-                    completion = generate_text_gemini(
-                        reddit_user_prompt,
-                        system_prompt=reddit_system_prompt,
-                    ) or ""
+                    from llm_provider import generate_text_groq
+                    completion = generate_text_groq(reddit_user_prompt, system_prompt=reddit_system_prompt) or ""
                     if completion:
-                        print("[SCRIPT] ✅ Gemini succeeded.")
+                        print("[SCRIPT] ✅ Groq succeeded.")
                     else:
-                        print("[SCRIPT] ⚠️  Gemini returned empty output.")
-                except Exception as gemini_err:
-                    print(f"[SCRIPT] ⚠️  Gemini raised exception: {type(gemini_err).__name__}: {gemini_err}")
+                        print("[SCRIPT] ⚠️ Groq returned empty.")
+                except Exception as e:
+                    print(f"[SCRIPT] ⚠️ Groq failed: {e}")
                     completion = ""
 
-                # ── STEP 3: Fall back to Ollama if Gemini failed ──────────
+                # ── STEP 3: Fall back to Gemini ───────────────────────────
                 if not completion:
-                    print("[SCRIPT] Gemini failed — falling back to Ollama...")
+                    print("[SCRIPT] Falling back to Gemini...")
+                    try:
+                        from llm_provider import generate_text_gemini
+                        completion = generate_text_gemini(reddit_user_prompt, system_prompt=reddit_system_prompt) or ""
+                        if completion:
+                            print("[SCRIPT] ✅ Gemini succeeded.")
+                    except Exception as e:
+                        print(f"[SCRIPT] ⚠️ Gemini failed: {e}")
+                        completion = ""
+
+                # ── STEP 4: Fall back to Ollama ───────────────────────────
+                if not completion:
+                    print("[SCRIPT] Falling back to Ollama...")
                     try:
                         from llm_provider import generate_text_ollama
-                        completion = generate_text_ollama(
-                            reddit_user_prompt,
-                            system_prompt=reddit_system_prompt,
-                        ) or ""
-                        if completion:
-                            print("[SCRIPT] ✅ Ollama fallback succeeded.")
-                        else:
-                            print("[SCRIPT] ❌ Ollama also returned empty output.")
-                    except Exception as ollama_err:
-                        print(f"[SCRIPT] ❌ Ollama fallback failed: {type(ollama_err).__name__}: {ollama_err}")
+                        completion = generate_text_ollama(reddit_user_prompt, system_prompt=reddit_system_prompt) or ""
+                    except Exception as e:
+                        print(f"[SCRIPT] ❌ Ollama failed: {e}")
                         completion = ""
 
             else:
@@ -337,7 +360,7 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
 
         if self.story_mode == "ollama" or not completion:
             # ── AI original story generation ─────────────────────────
-            print("[SCRIPT] AI mode — generating AI story using Gemini...")
+            print("[SCRIPT] AI mode — generating AI story using Groq...")
 
             ai_system_prompt = (
                 "You are a YouTube Shorts narrator who writes mind-blowing fact videos. "
@@ -359,14 +382,14 @@ STRICT OUTPUT RULES — violate any of these and you have failed:
                 f"Follow your rules exactly. Output the narration script only."
             )
 
+            from llm_provider import generate_text_groq, generate_text_gemini
             try:
-                from llm_provider import generate_text_gemini
-                completion = generate_text_gemini(
-                    ai_user_prompt,
-                    system_prompt=ai_system_prompt,
-                ) or ""
+                completion = generate_text_groq(ai_user_prompt, system_prompt=ai_system_prompt) or ""
+                if not completion:
+                    print("[SCRIPT] Groq failed for facts mode, falling back to Gemini...")
+                    completion = generate_text_gemini(ai_user_prompt, system_prompt=ai_system_prompt) or ""
             except Exception as e:
-                print(f"[SCRIPT] Gemini script generation failed: {e}")
+                print(f"[SCRIPT] Script generation failed: {e}")
                 completion = ""
 
             if completion:
@@ -790,12 +813,12 @@ For context, here is the full script:
             try:
                 with open(_os.path.join(ROOT_DIR, "config.json"), "r") as _f:
                     _cfg = _json.load(_f)
-                api_key = _cfg.get("pexels_api", "").strip()
+                api_key = _cfg.get("pexels_api_key", "").strip()
             except Exception:
                 api_key = ""
 
             if not api_key:
-                print("[PEXELS] No pexels_api key found in config.json. Skipping.")
+                print("[PEXELS] No pexels_api_key found in config.json. Skipping.")
                 return None
 
             # Extract 2-3 broad visual keywords via Gemini
@@ -803,7 +826,7 @@ For context, here is the full script:
                 from llm_provider import generate_text_gemini
                 kw_raw = generate_text_gemini(
                     f"Extract 2-3 broad, visual search keywords from this scene description. "
-                    f"Return ONLY the keywords separated by spaces, nothing else.\n\nDescription: {prompt}"
+                    f"Return ONLY the keywords separated by spaces, nothing else.\nself._files_to_delete.append(image_path)\n\nDescription: {prompt}"
                 ) or ""
                 keywords = kw_raw.strip().replace(",", " ").split()
                 keywords = [k for k in keywords if len(k) > 2][:3]
@@ -890,7 +913,7 @@ For context, here is the full script:
         Returns:
             path (str): Path to the saved file, or None.
         """
-        print(f"\n[IMG] ---------------- Generating Scene ----------------")
+        print(f"\nself._files_to_delete.append(video_path)\n[IMG] ---------------- Generating Scene ----------------")
         print(f"[IMG] Prompt: {prompt[:100]}...")
 
         # Guard against empty/blank prompts
@@ -975,7 +998,7 @@ For context, here is the full script:
         self.script = re.sub(r" +", " ", self.script).strip()
 
         # STEP 4 — Print for visual validation before TTS
-        print("\n[TTS SCRIPT PREVIEW] " + "-" * 50)
+        print("\nself._files_to_delete.append(path)\n[TTS SCRIPT PREVIEW] " + "-" * 50)
         print(self.script)
         print("-" * 70 + "\n")
 
@@ -1130,10 +1153,21 @@ For context, here is the full script:
         cues: list[tuple[float, float, str]] = []
         for i in range(0, len(words), WORDS_PER_CUE):
             chunk = words[i : i + WORDS_PER_CUE]
-            cue_start = chunk[0][0]
-            cue_end   = chunk[-1][1]
-            cue_text  = " ".join(w[2] for w in chunk)
-            cues.append((cue_start, cue_end, cue_text))
+            
+            for j, w in enumerate(chunk):
+                start = w[0]
+                end = w[1]
+                
+                # Build the text for this word's duration
+                styled_words = []
+                for k, cw in enumerate(chunk):
+                    if k == j:
+                        styled_words.append(f"{{\\c&H00FFFF&}}{cw[2]}{{\\c&HFFFFFF&}}")
+                    else:
+                        styled_words.append(cw[2])
+                
+                cue_text = " ".join(styled_words)
+                cues.append((start, end, cue_text))
 
         # ── ASS timestamp helper ───────────────────────────────────────────
         def _ass_ts(seconds: float) -> str:
@@ -1177,7 +1211,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 f"Dialogue: 0,{_ass_ts(start)},{_ass_ts(end)},Default,,0,0,0,,{text}"
             )
 
-        ass_content = ass_header + "\n".join(event_lines) + "\n"
+        ass_content = ass_header + "\nself._files_to_delete.append(path)\n".join(event_lines) + "\n"
 
         ass_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".ass")
         with open(ass_path, "w", encoding="utf-8") as fh:
@@ -1334,7 +1368,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
 
             if result.returncode != 0:
-                warning(f"[SUBS] FFmpeg subtitle burn failed:\n{result.stderr[-1000:]}")
+                warning(f"[SUBS] FFmpeg subtitle burn failed:\nself._files_to_delete.append(image_path)\n{result.stderr[-1000:]}")
                 # Fall back: just rename the raw video as the output
                 shutil.copy2(raw_path, combined_image_path)
             else:
@@ -1506,6 +1540,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             ActionChains(driver).send_keys(Keys.ESCAPE).perform()
             time.sleep(0.2)
 
+    def _click_next_step(self, driver):
+        """Helper to click 'Next' and handle the overlay bug."""
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.common.by import By
+        import time
+        # Note: YOUTUBE_NEXT_BUTTON_ID is expected to be imported or available.
+        next_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
+        )
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
+            )
+            driver.execute_script("arguments[0].click();", next_button)
+        except Exception:
+            driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", next_button)
+        time.sleep(2)
+
     def upload_video(self) -> bool:
         """
         Uploads the video to YouTube.
@@ -1610,7 +1665,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 EC.presence_of_element_located((By.NAME, "VIDEO_MADE_FOR_KIDS_NOT_MFK"))
             )
 
-            is_kids = get_is_for_kids()
+            is_kids = False
             target_name = "VIDEO_MADE_FOR_KIDS" if is_kids else "VIDEO_MADE_FOR_KIDS_NOT_MFK"
             
             selectors = [
@@ -1662,53 +1717,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # Click next (step 1 → 2)
             if verbose:
                 info("\t=> Clicking next (step 1)...")
-            next_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
-            )
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
-                )
-                driver.execute_script("arguments[0].click();", next_button)
-            except Exception:
-                driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].click();", next_button)
-            time.sleep(2)
+            self._click_next_step(driver)
 
             # Click next (step 2 → 3)
             if verbose:
                 info("\t=> Clicking next (step 2)...")
-            next_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
-            )
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
-                )
-                driver.execute_script("arguments[0].click();", next_button)
-            except Exception:
-                driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].click();", next_button)
-            time.sleep(2)
+            self._click_next_step(driver)
 
             # Click next (step 3 → 4 visibility)
             if verbose:
                 info("\t=> Clicking next (step 3)...")
-            next_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, YOUTUBE_NEXT_BUTTON_ID))
-            )
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.invisibility_of_element_located((By.CSS_SELECTOR, "tp-yt-iron-overlay-backdrop.opened"))
-                )
-                driver.execute_script("arguments[0].click();", next_button)
-            except Exception:
-                driver.execute_script("document.querySelector('tp-yt-iron-overlay-backdrop').removeAttribute('opened');")
-                time.sleep(0.5)
-                driver.execute_script("arguments[0].click();", next_button)
-            time.sleep(2)
+            self._click_next_step(driver)
 
             # Step 1: Wait 3 seconds after reaching the visibility step
             if verbose:
@@ -1716,9 +1735,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             time.sleep(3)
 
             unlisted_xpaths = [
-                "//tp-yt-paper-radio-group//tp-yt-paper-radio-button[2]",
-                "//*[contains(@name, 'VIDEO_MADE_FOR_KIDS')]/..//tp-yt-paper-radio-button[2]",
-                "//ytcp-video-visibility-select//tp-yt-paper-radio-button[2]"
+                "//tp-yt-paper-radio-group//tp-yt-paper-radio-button[1]",
+                "//*[contains(@name, 'VIDEO_MADE_FOR_KIDS')]/..//tp-yt-paper-radio-button[1]",
+                "//ytcp-video-visibility-select//tp-yt-paper-radio-button[1]"
             ]
 
             unlisted_element = None
@@ -1752,6 +1771,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # the visibility change. Shadow DOM inside ytcp-button means normal
             # XPath / WebDriverWait cannot find the element at all.
             time.sleep(3)
+
+            # --- ADD THIS BLOCK BEFORE CLICKING 'DONE' ---
+            if verbose:
+                info("\t=> Waiting for video file to finish uploading...")
+            
+            try:
+                # Wait up to 5 minutes (300 seconds) for the "Uploading..." text to disappear
+                WebDriverWait(driver, 300).until(
+                    EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'Uploading')]"))
+                )
+                print("[UPLOAD] Video upload complete! Proceeding to save.")
+            except Exception:
+                print("[UPLOAD] Warning: Timed out waiting for upload to finish, attempting to save anyway...")
+            # ----------------------------------------------
 
             if verbose:
                 info("\t=> Clicking done button (Shadow DOM JS pierce)...")

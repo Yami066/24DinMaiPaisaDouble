@@ -7,7 +7,7 @@
   "twitter_language": "English",
   "gemini_image_api_base_url": "https://generativelanguage.googleapis.com/v1beta",
   "gemini_image_api_key": "",
-  "gemini_image_model": "imagen-3.0-generate-002",
+  "gemini_image_model": "imagen-4.0-fast-generate-001",
   "gemini_image_aspect_ratio": "9:16",
   "threads": 2,
   "zip_url": "",
